@@ -78,10 +78,20 @@ def apply_filters(pcd, enable_voxel_downsampling=True, enable_outlier_removal=Tr
     """Applies filters to the point cloud (toggle on/off using parameters)."""
     print("\nApplying filters...")
 
+    # Voxel Downsampling: Reduces point cloud sze, smooths data by clumping points together.
+    # Tunable Parameter: voxel_size (meters)
+    # Tuning Tips: 
+    #   * Small value -> detailed pointcloud
+    #   * Large value -> simpler pointcloud
     if enable_voxel_downsampling:
         print("Voxel downsampling enabled.")
         pcd = pcd.voxel_down_sample(voxel_size=0.005)
 
+    # Statistical Outlier Removal: Removes noise & isolated points
+    # Tunable Parameter: nb_neighbors (number of surrounding points used as reference), std_ratio (standard deviation)
+    # Tuning Tips: 
+    #   * Higher nb_neighbors -> stronger filtering
+    #   * Lower std_ratio -> stricter removal
     if enable_outlier_removal:
         print("Outlier removal enabled.")
         pcd, _ = pcd.remove_statistical_outlier(nb_neighbors=20, std_ratio=2.0)
@@ -113,7 +123,7 @@ def align_point_clouds(pcds):
 
 def save_point_cloud(pcd, filename="output9.ply"):
     """Saves the point cloud to a .ply file."""
-    print(f"\n💾 Saving final point cloud to {filename}...")
+    print(f"\nSaving final point cloud to {filename}...")
     o3d.io.write_point_cloud(filename, pcd)
     print("Save complete!")
 
