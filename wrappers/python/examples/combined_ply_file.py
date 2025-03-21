@@ -12,7 +12,7 @@ pipeline.start(config)
 pc = rs.pointcloud()
 
 # Initialize save_to_ply object
-ply = rs.save_to_ply('combined_pointcloud_KylerTest5.ply')
+ply = rs.save_to_ply('combined_pointcloud_Reynaldo1.ply')
 ply.set_option(rs.save_to_ply.option_ply_binary, False)
 ply.set_option(rs.save_to_ply.option_ply_normals, True)
 ply.set_option(rs.save_to_ply.option_ignore_color, False)

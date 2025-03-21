@@ -6,7 +6,7 @@
 ###############################################
 
 # First import the library
-import pybackend2 as rs
+import pybackend as rs
 import time
 
 def on_frame(profile, f):
