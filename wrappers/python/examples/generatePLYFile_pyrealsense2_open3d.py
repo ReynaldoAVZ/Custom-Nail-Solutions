@@ -148,6 +148,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-# This is a test comment, Spencer
-
-# This is a test comment to get GITHUB working
