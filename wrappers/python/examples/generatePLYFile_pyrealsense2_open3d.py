@@ -121,7 +121,7 @@ def align_point_clouds(pcds):
     print("Alignment complete!")
     return reference_pcd
 
-def save_point_cloud(pcd, filename="output9.ply"):
+def save_point_cloud(pcd, filename="ReynaldoTest2.ply"):
     """Saves the point cloud to a .ply file."""
     print(f"\nSaving final point cloud to {filename}...")
     o3d.io.write_point_cloud(filename, pcd)
@@ -149,3 +149,5 @@ if __name__ == "__main__":
     main()
 
 # This is a test comment, Spencer
+
+# This is a test comment to get GITHUB working
