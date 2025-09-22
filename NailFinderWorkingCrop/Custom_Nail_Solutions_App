@@ -1,0 +1,598 @@
+from PyQt6.QtWidgets import (
+    QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
+    QWidget, QDialog, QDialogButtonBox, QMessageBox, QFileDialog, QScrollArea,
+    QLineEdit
+)
+from PyQt6.QtGui import (QPixmap, QImage, QPainter, QColor, QFont)
+from PyQt6.QtCore import Qt, QThread, pyqtSignal
+import open3d as o3d
+import sys
+import os
+import pyrealsense2 as rs
+import numpy as np
+import cv2
+import time
+
+class LoadDialog(QDialog):
+    """
+    A dialog window that allows users to load different types of files.
+    Each button opens a file dialog specific to that file type.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Load Options")
+        self.loaded_files = {"jpeg_png": [], "npy": [], "ply": [], "stl": []}
+        self.setFixedSize(300, 200)
+        
+        layout = QVBoxLayout(self)
+
+        # Create buttons for each file type
+        self.jpeg_png_button = QPushButton("Load JPEG/PNG", self)
+        self.jpeg_png_button.clicked.connect(self.load_jpeg_png)
+        layout.addWidget(self.jpeg_png_button)
+
+        self.ply_button = QPushButton("Load .PLY File", self)
+        self.ply_button.clicked.connect(self.load_ply)
+        layout.addWidget(self.ply_button)
+
+        self.npy_button = QPushButton("Load .NPY File", self)
+        self.npy_button.clicked.connect(self.load_npy)
+        layout.addWidget(self.npy_button)
+
+        self.stl_button = QPushButton("Load .STL File", self)
+        self.stl_button.clicked.connect(self.load_stl)
+        layout.addWidget(self.stl_button)
+
+        # Add a close button
+        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close, self)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+    def _load_files(self, file_type, title, name_filter):
+        """
+        Helper function to open a file dialog and load files of a specific type.
+
+        Args:
+            file_type (str): The key for storing file paths in self.loaded_files (e.g., "ply").
+            title (str): The title of the file dialog window.
+            name_filter (str): The filter for file extensions (e.g., "PLY Files (*.ply)").
+        """
+        file_dialog = QFileDialog(self)
+        file_dialog.setFileMode(QFileDialog.FileMode.ExistingFiles)
+        file_dialog.setNameFilter(name_filter)
+        if file_dialog.exec():
+            selected_files = file_dialog.selectedFiles()
+            self.loaded_files[file_type].extend(selected_files)
+            QMessageBox.information(self, title, "Loaded:\n" + "\n".join(selected_files))
+            self.accept() # Close the dialog after successful loading
+
+    def load_jpeg_png(self):
+        """Opens a dialog to load JPEG or PNG images."""
+        self._load_files("jpeg_png", "Load JPEG/PNG", "Image Files (*.jpeg *.jpg *.png)")
+
+    def load_ply(self):
+        """Opens a dialog to load PLY files."""
+        self._load_files("ply", "Load PLY", "PLY Files (*.ply)")
+
+    def load_npy(self):
+        """Opens a dialog to load NumPy .npy files."""
+        self._load_files("npy", "Load NPY", "NumPy Files (*.npy)")
+
+    def load_stl(self):
+        """Opens a dialog to load STL files."""
+        self._load_files("stl", "Load STL", "STL Files (*.stl)")
+
+class SlidingMenu(QWidget):
+    """
+    A simple collapsible menu widget containing a vertical list of buttons.
+    """
+    def __init__(self, parent=None, options=None):
+        super().__init__(parent)
+        self.setFixedWidth(200)
+        self.setStyleSheet("background-color: #f0f0f0;")
+        self.layout = QVBoxLayout(self)
+        self.setLayout(self.layout)
+        if options:
+            for option in options:
+                self.add_option(option)
+
+    def add_option(self, name):
+        """
+        Adds a new button (option) to the menu.
+
+        Args:
+            name (str): The text to display on the button.
+
+        Returns:
+            QPushButton: The created button widget.
+        """
+        button = QPushButton(name, self)
+        button.setStyleSheet("text-align: left; padding: 10px; background-color: #4CAF50; color: white; font-weight: bold;")
+        self.layout.addWidget(button)
+        return button
+        
+class MainWindow(QMainWindow):
+    """
+    The main application window. It handles the UI layout, menus,
+    and connects user actions to the corresponding functionalities.
+    """
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Custom Nail Solutions App")
+        self.setGeometry(100, 100, 1000, 800)
+
+        # Application state
+        self.loaded_files = {"jpeg_png": [], "npy": [], "ply": [], "stl": []}
+        self.view_loaded_files_active = False
+        self.capture_thread = None
+        self.camera_found = True
+        self.active_menu = None
+
+        # --- UI Setup ---
+        main_widget = QWidget(self)
+        self.setCentralWidget(main_widget)
+        main_layout = QHBoxLayout(main_widget)
+
+        # Left panel for menus
+        left_layout = QVBoxLayout()
+        button_layout = QHBoxLayout()
+
+        # Main toggle buttons
+        self.menu_button = QPushButton("Menu", self)
+        self.menu_button.setFixedWidth(80)
+        self.menu_button.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        self.menu_button.clicked.connect(self.toggle_menu)
+        button_layout.addWidget(self.menu_button)
+
+        self.processes_button = QPushButton("Processes", self)
+        self.processes_button.setFixedWidth(100) # Increased width for better text fit
+        self.processes_button.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        self.processes_button.clicked.connect(self.toggle_processes)
+        button_layout.addWidget(self.processes_button)
+
+        self.view_button = QPushButton("View", self)
+        self.view_button.setFixedWidth(80)
+        self.view_button.setStyleSheet("background-color: #2196F3; color: white; font-weight: bold;")
+        self.view_button.clicked.connect(self.toggle_view)
+        button_layout.addWidget(self.view_button)
+        left_layout.addLayout(button_layout)
+
+        # Sliding Menus
+        self.menu = SlidingMenu(self, options=["Save", "Load", "View Loaded Files", "Settings"])
+        self.menu.setVisible(False)
+        left_layout.addWidget(self.menu)
+
+        self.processes_menu = SlidingMenu(self, options=["Live Feed", "Capture Images", "Run Neural Network", "Generate Point Cloud"])
+        self.processes_menu.setVisible(False)
+        left_layout.addWidget(self.processes_menu)
+
+        self.view_menu = SlidingMenu(self, options=["View Image", "View PointCloud", "View Mesh"])
+        self.view_menu.setVisible(False)
+        left_layout.addWidget(self.view_menu)
+
+        left_layout.addStretch()
+        main_layout.addLayout(left_layout)
+
+        # Right panel for content
+        self.content_area = QScrollArea(self)
+        self.content_widget = QWidget()
+        self.content_layout = QVBoxLayout(self.content_widget)
+        self.stream_label = QLabel(self)
+        self.content_layout.addWidget(self.stream_label)
+        self.content_area.setWidget(self.content_widget)
+        self.content_area.setWidgetResizable(True)
+        main_layout.addWidget(self.content_area, 1)
+        self.content_area.setVisible(False)
+
+        # --- Connect Signals ---
+        self._connect_signals()
+
+    def _connect_signals(self):
+        """Centralized method to connect all UI signals to their slots."""
+        # Menu options
+        load_button = self.menu.layout.itemAt(1).widget()
+        load_button.clicked.connect(self.open_load_dialog)
+        view_loaded_button = self.menu.layout.itemAt(2).widget()
+        view_loaded_button.clicked.connect(self.view_loaded_files)
+
+        # Processes options
+        live_feed_button = self.processes_menu.layout.itemAt(0).widget()
+        live_feed_button.clicked.connect(self.live_feed)
+        capture_button = self.processes_menu.layout.itemAt(1).widget()
+        capture_button.clicked.connect(self.capture_images)
+        run_nn_button = self.processes_menu.layout.itemAt(2).widget()
+        run_nn_button.clicked.connect(self.run_neural_network)
+        generate_pcd_button = self.processes_menu.layout.itemAt(3).widget()
+        generate_pcd_button.clicked.connect(self.generate_point_cloud)
+
+    def closeEvent(self, event):
+        """Ensures the camera thread is stopped gracefully on application exit."""
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_thread.stop()
+            self.capture_thread.wait()
+        event.accept()
+
+    def _set_active_menu(self, menu_to_toggle):
+        """
+        Helper to manage the visibility of sliding menus. Shows the selected
+        menu and hides all others. Toggles visibility if the same menu is selected again.
+        """
+        self.clear_view_loaded_files()
+        
+        is_different_menu = self.active_menu is not menu_to_toggle
+        
+        # Hide all menus
+        self.menu.setVisible(False)
+        self.processes_menu.setVisible(False)
+        self.view_menu.setVisible(False)
+        
+        if is_different_menu:
+            menu_to_toggle.setVisible(True)
+            self.active_menu = menu_to_toggle
+            is_processes = menu_to_toggle is self.processes_menu
+            self.content_area.setVisible(is_processes)
+        else:
+            self.active_menu = None
+            self.content_area.setVisible(False)
+
+    def toggle_menu(self):
+        self._set_active_menu(self.menu)
+
+    def toggle_processes(self):
+        self._set_active_menu(self.processes_menu)
+
+    def toggle_view(self):
+        self._set_active_menu(self.view_menu)
+
+    def open_load_dialog(self):
+        dialog = LoadDialog(self)
+        if dialog.exec():
+            for key in self.loaded_files:
+                self.loaded_files[key].extend(dialog.loaded_files[key])
+
+    def remove_file(self, file_type, file_path, widget_to_remove):
+        if file_path in self.loaded_files[file_type]:
+            self.loaded_files[file_type].remove(file_path)
+        widget_to_remove.setParent(None)
+        widget_to_remove.deleteLater()
+
+    def clear_view_loaded_files(self):
+        if self.view_loaded_files_active:
+            for i in reversed(range(self.content_layout.count())):
+                widget = self.content_layout.itemAt(i).widget()
+                if widget and widget is not self.stream_label:
+                    widget.setParent(None)
+                    widget.deleteLater()
+            self.view_loaded_files_active = False
+            # Make sure the permanent stream_label is hidden if we clear the view
+            self.stream_label.clear()
+
+    def _create_file_widget(self, file_type, path):
+        file_widget = QWidget()
+        file_layout = QHBoxLayout(file_widget)
+
+        if file_type == "jpeg_png" and os.path.exists(path):
+            pixmap = QPixmap(path).scaledToWidth(200, Qt.TransformationMode.SmoothTransformation)
+            label = QLabel()
+            label.setPixmap(pixmap)
+            file_layout.addWidget(label)
+        else:
+            label_text = os.path.basename(path)
+            if not os.path.exists(path):
+                label_text = f"NOT FOUND: {label_text}"
+            label = QLabel(label_text)
+            file_layout.addWidget(label)
+        
+        file_layout.addStretch()
+
+        if file_type in ["ply", "stl"] and os.path.exists(path):
+            view_button = QPushButton("View")
+            view_button.setStyleSheet("color: blue; font-weight: bold;")
+            view_func = self.view_ply_file if file_type == "ply" else self.view_stl_file
+            view_button.clicked.connect(lambda _, p=path: view_func(p))
+            file_layout.addWidget(view_button)
+
+        remove_button = QPushButton("X")
+        remove_button.setFixedSize(20, 20)
+        remove_button.setStyleSheet("color: red; font-weight: bold;")
+        remove_button.clicked.connect(lambda: self.remove_file(file_type, path, file_widget))
+        file_layout.addWidget(remove_button)
+
+        return file_widget
+        
+    def view_loaded_files(self):
+        if self.view_loaded_files_active:
+            self.clear_view_loaded_files()
+            self.content_area.setVisible(False)
+            return
+
+        self.clear_view_loaded_files()
+        self.view_loaded_files_active = True
+        self.content_area.setVisible(True)
+
+        if not any(self.loaded_files.values()):
+            label = QLabel("No files loaded.")
+            label.setStyleSheet("color: grey; font-size: 16px; padding: 10px;")
+            self.content_layout.addWidget(label)
+            return
+
+        for file_type, paths in self.loaded_files.items():
+            if paths:
+                header_label = QLabel(f"{file_type.upper()} Files:")
+                header_label.setStyleSheet("font-weight: bold; font-size: 14px; margin-top: 10px;")
+                self.content_layout.addWidget(header_label)
+                for path in paths:
+                    file_widget = self._create_file_widget(file_type, path)
+                    self.content_layout.addWidget(file_widget)
+        
+        self.content_layout.addStretch()
+
+    def view_ply_file(self, file_path):
+        try:
+            geometry = o3d.io.read_triangle_mesh(file_path)
+            if not geometry.has_triangles():
+                geometry = o3d.io.read_point_cloud(file_path)
+            if geometry.is_empty():
+                QMessageBox.warning(self, "Error", f"Unable to load valid geometry from {os.path.basename(file_path)}")
+                return
+            o3d.visualization.draw([geometry], window_name=f"Viewing {os.path.basename(file_path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Open3D Error", f"Could not read file: {e}")
+
+    def view_stl_file(self, file_path):
+        try:
+            geometry = o3d.io.read_triangle_mesh(file_path)
+            if not geometry.has_triangles():
+                QMessageBox.warning(self, "Error", f"Unable to load valid geometry from {os.path.basename(file_path)}")
+                return
+            geometry.compute_vertex_normals()
+            o3d.visualization.draw_geometries([geometry], window_name=f"Viewing {os.path.basename(file_path)}")
+        except Exception as e:
+            QMessageBox.critical(self, "Open3D Error", f"Could not read file: {e}")
+
+    def live_feed(self):
+        live_feed_button = self.processes_menu.layout.itemAt(0).widget()
+        if self.capture_thread is None or not self.capture_thread.isRunning():
+            self.capture_thread = ImageCaptureThread()
+            # Connect all signals from the thread
+            self.capture_thread.image_ready.connect(self.update_frame)
+            self.capture_thread.finished.connect(self.capture_finished)
+            self.capture_thread.camera_error.connect(self.handle_camera_error) # Connect new error signal
+            
+            self.capture_thread.start()
+            live_feed_button.setText("Stop Live Feed")
+            self.camera_found = True # Assume camera is found until an error is signaled
+            self.stream_label.clear() # Clear any old content
+        else:
+            self.stop_capture()
+
+    def stop_capture(self):
+        if self.capture_thread and self.capture_thread.isRunning():
+            self.capture_thread.stop()
+            live_feed_button = self.processes_menu.layout.itemAt(0).widget()
+            live_feed_button.setText("Live Feed")
+
+    def capture_finished(self):
+        live_feed_button = self.processes_menu.layout.itemAt(0).widget()
+        live_feed_button.setText("Live Feed")
+        
+        # Show success message only if the camera was found and feed was stopped by the user
+        if self.camera_found:
+            QMessageBox.information(self, "Capture", "Live Feed stopped.")
+        
+        self.capture_thread = None
+
+    def handle_camera_error(self, message):
+        """
+        Displays a pop-up error message from the camera thread and resets the UI.
+        
+        Args:
+            message (str): The error message to display.
+        """
+        QMessageBox.critical(self, "Camera Error", message)
+        self.camera_found = False # Flag that an error occurred
+        live_feed_button = self.processes_menu.layout.itemAt(0).widget()
+        live_feed_button.setText("Live Feed")
+        self.capture_thread = None # Ensure thread is cleared
+
+
+    def update_frame(self, color_image):
+        height, width, channels = color_image.shape
+        bytes_per_line = width * channels
+        qimage = QImage(color_image.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+        pixmap = QPixmap.fromImage(qimage)
+        self.stream_label.setPixmap(pixmap)
+
+    def capture_images(self):
+        """Capture images from the camera."""
+        dialog = CaptureDialog(self)
+
+        if dialog.exec():
+            frames, delay, fileName = dialog.get_inputs()
+
+            if frames is not None and delay is not None and fileName is not None:
+                """
+                Captures raw depth and color frames from an Intel RealSense camera and saves them.
+
+                - Depth frames are saved in both .npy (raw 16-bit) and .png (normalized 8-bit) formats.
+                - Color frames are saved in both .npy and .png formats.
+                """
+
+                time.sleep(delay)  # Delay before starting capture
+
+                # Ensure the save directory exists
+                try:
+                    sanitized_fileName = "".join(c for c in fileName if c.isalnum() or c in (' ', '_', '-')).strip()
+                    file_dialog = QFileDialog(self)
+                    file_dialog.setFileMode(QFileDialog.FileMode.Directory)
+                    file_dialog.setOption(QFileDialog.Option.ShowDirsOnly, True)
+                    if file_dialog.exec():
+                        base_path = file_dialog.selectedFiles()[0]
+                    else:
+                        QMessageBox.warning(self, "Error", "No directory selected. Operation canceled.")
+                        return
+
+                    save_path = os.path.join(base_path, sanitized_fileName)
+                    os.makedirs(save_path, exist_ok=True)
+
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to create directory '{save_path}': {str(e)}")
+                    return
+
+                # Configure the Intel RealSense pipeline
+                pipeline = rs.pipeline()
+                config = rs.config()
+                config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)  # 16-bit depth stream
+                config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)  # 8-bit color stream
+
+                # Start streaming
+                pipeline.start(config)
+
+                try:
+                    for i in range(frames):
+                        # Wait for frames to be captured
+                        frames = pipeline.wait_for_frames()
+                        depth_frame = frames.get_depth_frame()
+                        color_frame = frames.get_color_frame()
+
+                        if not depth_frame or not color_frame:
+                            continue
+
+                        # Convert depth and color frames to numpy arrays
+                        depth_image = np.asanyarray(depth_frame.get_data())  # dtype: uint16 (16-bit depth)
+                        color_image = np.asanyarray(color_frame.get_data())  # dtype: uint8 (RGB image)
+
+                        # Normalize depth image for visualization (convert to 8-bit)
+                        depth_normalized = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
+                        depth_normalized = np.uint8(depth_normalized)  # Convert to uint8 for saving as PNG
+
+                        # Save depth images
+                        np.save(f"{save_path}/{sanitized_fileName}_Depth{i+1}.npy", depth_image)  # Raw 16-bit depth
+                        cv2.imwrite(f"{save_path}/{sanitized_fileName}_Depth{i+1}.png", depth_normalized)  # 8-bit visualization
+
+                        # Save color images
+                        cv2.imwrite(f"{save_path}/{sanitized_fileName}_Color{i+1}.png", color_image)  # Standard 8-bit color image
+                        np.save(f"{save_path}/{sanitized_fileName}_Color{i+1}.npy", color_image)  # Raw color data
+
+                finally:
+                    # Stop streaming when done
+                    pipeline.stop()
+                    QMessageBox.information(self, "Capture Images", "Image capture completed.")
+
+    def run_neural_network(self):
+        QMessageBox.information(self, "Run Neural Network", "This feature is not yet implemented.")
+
+    def generate_point_cloud(self):
+        QMessageBox.information(self, "Generate Point Cloud", "This feature is not yet implemented.")
+
+class CaptureDialog(QDialog):
+    """
+    A dialog to get user input for the number of frames, delay, and filename
+    for the image capture process.
+    """
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Capture Images")
+        self.setFixedSize(300, 200)
+
+        layout = QVBoxLayout(self)
+
+        self.frames_input = QLineEdit(self)
+        self.frames_input.setPlaceholderText("e.g., 5")
+        layout.addWidget(QLabel("Number of Frames:"))
+        layout.addWidget(self.frames_input)
+
+        self.delay_input = QLineEdit(self)
+        self.delay_input.setPlaceholderText("e.g., 3")
+        layout.addWidget(QLabel("Delay Before Start (seconds):"))
+        layout.addWidget(self.delay_input)
+
+        self.filename_input = QLineEdit(self)
+        self.filename_input.setPlaceholderText("e.g., HandScan_01")
+        layout.addWidget(QLabel("Base File Name:"))
+        layout.addWidget(self.filename_input)
+
+        self.button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, self)
+        self.button_box.accepted.connect(self.accept)
+        self.button_box.rejected.connect(self.reject)
+        layout.addWidget(self.button_box)
+
+    def get_inputs(self):
+        """
+        Validates and returns the user's input.
+
+        Returns:
+            tuple: (frames, delay, fileName) or (None, None, None) if input is invalid.
+        """
+        try:
+            frames = int(self.frames_input.text())
+            delay = int(self.delay_input.text())
+            fileName = self.filename_input.text()
+            if frames <= 0 or delay < 0 or not fileName.strip():
+                raise ValueError("Inputs must be valid.")
+            return frames, delay, fileName
+        except ValueError:
+            QMessageBox.warning(self, "Invalid Input", "Please enter a positive integer for frames, a valid delay, and a non-empty filename.")
+            return None, None, None
+
+
+class ImageCaptureThread(QThread):
+    """
+    A QThread that continuously captures frames from a RealSense camera
+    to prevent the GUI from freezing.
+    """
+    image_ready = pyqtSignal(np.ndarray)
+    camera_error = pyqtSignal(str)
+
+    def __init__(self):
+        super().__init__()
+        self._running = True
+
+    def run(self):
+        """
+        The main thread loop. Initializes the camera and captures frames
+        until stopped.
+        """
+        pipeline = None
+        try:
+            # Proactive check for connected devices
+            context = rs.context()
+            if not context.query_devices():
+                # If no devices are found, emit the error signal and exit the thread
+                self.camera_error.emit("No RealSense camera connected. Please check the connection and restart.")
+                return 
+
+            pipeline = rs.pipeline()
+            config = rs.config()
+            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            
+            pipeline.start(config)
+            
+            while self._running:
+                frames = pipeline.wait_for_frames()
+                color_frame = frames.get_color_frame()
+                if not color_frame:
+                    continue
+
+                color_image = np.asanyarray(color_frame.get_data())
+                self.image_ready.emit(color_image)
+        
+        except Exception as e:
+            # If any other runtime error occurs, emit it
+            self.camera_error.emit(f"An unexpected camera error occurred: {e}")
+
+        finally:
+            if pipeline:
+                pipeline.stop()
+
+    def stop(self):
+        """Stops the thread's execution loop."""
+        self._running = False
+        self.wait() # Wait for the thread to finish cleanly
+
+
+if __name__ == "__main__":
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
