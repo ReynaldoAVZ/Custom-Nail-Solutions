@@ -1,9 +1,10 @@
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QWidget, QDialog, QDialogButtonBox, QMessageBox, QFileDialog, QScrollArea,
-    QLineEdit
+    QLineEdit, QCheckBox, QSpinBox
 )
-from PyQt6.QtGui import (QPixmap, QImage, QPainter, QColor, QFont)
+from PyQt6.QtWidgets import QInputDialog
+from PyQt6.QtGui import (QPixmap, QImage, QPainter, QColor, QFont, QPalette)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 import open3d as o3d
 import sys
@@ -12,17 +13,381 @@ import pyrealsense2 as rs
 import numpy as np
 import cv2
 import time
+import json
+from PyQt6.QtWidgets import QSlider
+from PyQt6.QtWidgets import QColorDialog
+from PyQt6.QtCore import QPoint
+from PyQt6.QtGui import QMouseEvent
+import threading
+
+
+class ImageViewerDialog(QDialog):
+    """Image viewer with zoom (wheel/slider/keys) and pan (mouse drag / arrow keys).
+
+    The viewer keeps the cursor point stable when zooming with the wheel.
+    """
+    def __init__(self, image_path, parent=None, initial_width=400):
+        super().__init__(parent)
+        self.setWindowTitle(f"Viewing Image: {os.path.basename(image_path)}")
+        self.image_path = image_path
+        self.layout = QVBoxLayout(self)
+
+        self.label = QLabel(self)
+        self.label.setBackgroundRole(QPalette.ColorRole.Base)
+        self.label.setSizePolicy(self.label.sizePolicy().horizontalPolicy(), self.label.sizePolicy().verticalPolicy())
+        self.pix = QPixmap(image_path)
+        self.scale = 1.0
+        self.initial_width = int(initial_width)
+
+        # Scroll area to host the label for native panning
+        from PyQt6.QtWidgets import QScrollArea
+        self.scroll = QScrollArea(self)
+        self.scroll.setWidgetResizable(False)
+        self.scroll.setWidget(self.label)
+        self.layout.addWidget(self.scroll)
+
+        # Controls: Zoom slider plus Reset / Fit buttons
+        ctrl_layout = QHBoxLayout()
+
+        self.slider = QSlider(Qt.Orientation.Horizontal, self)
+        self.slider.setRange(10, 800)
+        self.slider.setValue(100)
+        self.slider.valueChanged.connect(self._on_slider_changed)
+        ctrl_layout.addWidget(self.slider)
+
+        self.reset_btn = QPushButton("Reset", self)
+        self.reset_btn.clicked.connect(self.reset_view)
+        ctrl_layout.addWidget(self.reset_btn)
+
+        self.fit_btn = QPushButton("Fit to Window", self)
+        self.fit_btn.clicked.connect(self.fit_to_window)
+        ctrl_layout.addWidget(self.fit_btn)
+
+        self.layout.addLayout(ctrl_layout)
+
+        # Install event filter on the viewport to capture mouse/wheel events
+        self.scroll.viewport().installEventFilter(self)
+
+        # Initialize display
+        self._apply_scale_to_label()
+
+    def _apply_scale_to_label(self, focus_point=None):
+        """Scale the pixmap and adjust scrollbars so that focus_point (viewport coords)
+        remains pointing to the same image pixel. If focus_point is None, keep center."""
+        if self.pix.isNull():
+            self.label.setText("Failed to load image")
+            return
+
+        orig_w = self.pix.width()
+        orig_h = self.pix.height()
+        new_w = max(1, int(orig_w * self.scale))
+        new_h = max(1, int(orig_h * self.scale))
+
+        # compute focus proportions
+        hbar = self.scroll.horizontalScrollBar()
+        vbar = self.scroll.verticalScrollBar()
+        vw = self.scroll.viewport().width()
+        vh = self.scroll.viewport().height()
+
+        if focus_point is None:
+            # keep center
+            focus_x = hbar.value() + vw / 2
+            focus_y = vbar.value() + vh / 2
+        else:
+            focus_x = hbar.value() + focus_point.x()
+            focus_y = vbar.value() + focus_point.y()
+
+        # proportions within the scaled image
+        old_scaled_w = int(orig_w * (self.scale if self.scale != 0 else 1))
+        # Prevent division by zero
+        if old_scaled_w <= 0:
+            prop_x = 0.5
+        else:
+            prop_x = focus_x / old_scaled_w
+
+        old_scaled_h = int(orig_h * (self.scale if self.scale != 0 else 1))
+        if old_scaled_h <= 0:
+            prop_y = 0.5
+        else:
+            prop_y = focus_y / old_scaled_h
+
+        # Apply new pixmap
+        scaled = self.pix.scaled(new_w, new_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.label.setPixmap(scaled)
+        self.label.resize(scaled.size())
+
+        # compute new scrollbar values so that the same proportion is under the viewport
+        new_scaled_w = scaled.width()
+        new_scaled_h = scaled.height()
+
+        new_hval = int(prop_x * new_scaled_w - (focus_point.x() if focus_point is not None else vw / 2))
+        new_vval = int(prop_y * new_scaled_h - (focus_point.y() if focus_point is not None else vh / 2))
+
+        # clamp values
+        new_hval = max(0, min(new_hval, max(0, new_scaled_w - vw)))
+        new_vval = max(0, min(new_vval, max(0, new_scaled_h - vh)))
+
+        hbar.setValue(new_hval)
+        vbar.setValue(new_vval)
+
+    def _on_slider_changed(self, value):
+        # keep viewport center as focus
+        focus = None
+        self.scale = value / 100.0
+        try:
+            vw = self.scroll.viewport().width()
+            vh = self.scroll.viewport().height()
+            focus = QPoint(int(vw / 2), int(vh / 2))
+        except Exception:
+            focus = None
+        self._apply_scale_to_label(focus_point=focus)
+
+    def reset_view(self):
+        """Reset zoom to 100% and center the image in the viewport."""
+        self.scale = 1.0
+        self.slider.setValue(100)
+        # center
+        self._apply_scale_to_label()
+
+    def fit_to_window(self):
+        """Adjust scale so the image fits the viewport while preserving aspect ratio."""
+        vw = max(1, self.scroll.viewport().width())
+        vh = max(1, self.scroll.viewport().height())
+        if self.pix.isNull():
+            return
+        iw = self.pix.width()
+        ih = self.pix.height()
+        # compute scale to fit
+        scale_x = vw / iw
+        scale_y = vh / ih
+        new_scale = min(scale_x, scale_y)
+        # clamp to slider range
+        new_scale = max(0.01, min(20.0, new_scale))
+        self.scale = new_scale
+        self.slider.setValue(int(self.scale * 100))
+        # keep center as focus so image is centered
+        self._apply_scale_to_label()
+
+    def eventFilter(self, obj, event):
+        # Handle mouse press/move/release/wheel on the viewport
+        from PyQt6.QtCore import QEvent
+        if obj is self.scroll.viewport():
+            if event.type() == QEvent.Type.MouseButtonPress:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._dragging = True
+                    self._last_pos = event.position()
+                    return True
+            elif event.type() == QEvent.Type.MouseMove:
+                if getattr(self, '_dragging', False):
+                    cur = event.position()
+                    delta = cur - self._last_pos
+                    self._last_pos = cur
+                    h = self.scroll.horizontalScrollBar()
+                    v = self.scroll.verticalScrollBar()
+                    h.setValue(int(h.value() - delta.x()))
+                    v.setValue(int(v.value() - delta.y()))
+                    return True
+            elif event.type() == QEvent.Type.MouseButtonRelease:
+                if event.button() == Qt.MouseButton.LeftButton:
+                    self._dragging = False
+                    return True
+            elif event.type() == QEvent.Type.Wheel:
+                # Zoom centered on cursor
+                try:
+                    angle = event.angleDelta().y()
+                except Exception:
+                    angle = 0
+                if angle == 0:
+                    return False
+                factor = 1.0 + (0.001 * angle)
+                # compute new scale but clamp
+                new_scale = max(0.01, min(20.0, self.scale * factor))
+                # compute focus point in viewport coords
+                pos = event.position()
+                focus = QPoint(int(pos.x()), int(pos.y()))
+                self.scale = new_scale
+                # update slider without triggering loop
+                self.slider.blockSignals(True)
+                self.slider.setValue(int(self.scale * 100))
+                self.slider.blockSignals(False)
+                self._apply_scale_to_label(focus_point=focus)
+                return True
+        return super().eventFilter(obj, event)
+
+    def keyPressEvent(self, event):
+        # arrow keys to pan; +/- to zoom; 0 to reset
+        key = event.key()
+        h = self.scroll.horizontalScrollBar()
+        v = self.scroll.verticalScrollBar()
+        step = 50
+        if key == Qt.Key.Key_Left:
+            h.setValue(max(0, h.value() - step))
+        elif key == Qt.Key.Key_Right:
+            h.setValue(min(h.maximum(), h.value() + step))
+        elif key == Qt.Key.Key_Up:
+            v.setValue(max(0, v.value() - step))
+        elif key == Qt.Key.Key_Down:
+            v.setValue(min(v.maximum(), v.value() + step))
+        elif key in (Qt.Key.Key_Plus, Qt.Key.Key_Equal):
+            self.scale = min(20.0, self.scale * 1.1)
+            self.slider.setValue(int(self.scale * 100))
+            self._apply_scale_to_label()
+        elif key == Qt.Key.Key_Minus:
+            self.scale = max(0.01, self.scale / 1.1)
+            self.slider.setValue(int(self.scale * 100))
+            self._apply_scale_to_label()
+        elif key == Qt.Key.Key_0:
+            self.scale = 1.0
+            self.slider.setValue(100)
+            self._apply_scale_to_label()
+        else:
+            super().keyPressEvent(event)
+
+
+class RenderSettingsDialog(QDialog):
+    """Dialog to pick simple rendering settings for Open3D viewers."""
+    @staticmethod
+    def get_settings(parent=None):
+        dlg = QDialog(parent)
+        dlg.setWindowTitle("Render Settings")
+        dlg.setFixedSize(380, 240)
+        layout = QVBoxLayout(dlg)
+
+        # Point size
+        ps_layout = QHBoxLayout()
+        ps_layout.addWidget(QLabel("Point size:"))
+        ps_spin = QSpinBox(dlg)
+        ps_spin.setRange(1, 20)
+        ps_spin.setValue(2)
+        ps_layout.addWidget(ps_spin)
+        layout.addLayout(ps_layout)
+
+        # Background color picker
+        bg_layout = QHBoxLayout()
+        bg_layout.addWidget(QLabel("Background color:"))
+        bg_color_btn = QPushButton("Choose color", dlg)
+        bg_color_preview = QLabel(dlg)
+        bg_color_preview.setFixedSize(40, 20)
+        bg_color_preview.setStyleSheet("background-color: rgb(0,0,0);")
+        def _pick_color():
+            col = QColorDialog.getColor(parent=dlg)
+            if col.isValid():
+                rgb = col.getRgb()[:3]
+                bg_color_preview.setStyleSheet(f"background-color: rgb({rgb[0]},{rgb[1]},{rgb[2]});")
+                bg_color_btn.setProperty('rgb', rgb)
+        bg_color_btn.clicked.connect(_pick_color)
+        bg_layout.addWidget(bg_color_btn)
+        bg_layout.addWidget(bg_color_preview)
+        layout.addLayout(bg_layout)
+
+        # Lighting / show normals toggles
+        opts_layout = QHBoxLayout()
+        lighting_cb = QCheckBox("Enable lighting")
+        lighting_cb.setChecked(True)
+        normals_cb = QCheckBox("Show normals")
+        normals_cb.setChecked(False)
+        opts_layout.addWidget(lighting_cb)
+        opts_layout.addWidget(normals_cb)
+        layout.addLayout(opts_layout)
+
+        # Camera preset
+        cam_layout = QHBoxLayout()
+        cam_layout.addWidget(QLabel("Camera preset:"))
+        cam_combo = QPushButton("Default")
+        cam_layout.addWidget(cam_combo)
+        layout.addLayout(cam_layout)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        ok = QPushButton("OK")
+        cancel = QPushButton("Cancel")
+        btn_row.addWidget(ok)
+        btn_row.addWidget(cancel)
+        layout.addLayout(btn_row)
+
+        result = {}
+        def _on_ok():
+            result['point_size'] = int(ps_spin.value())
+            rgb = bg_color_btn.property('rgb') if bg_color_btn.property('rgb') else (0,0,0)
+            result['bg_rgb'] = rgb
+            result['lighting'] = bool(lighting_cb.isChecked())
+            result['show_normals'] = bool(normals_cb.isChecked())
+            result['camera_preset'] = cam_combo.text()
+            dlg.accept()
+
+        ok.clicked.connect(_on_ok)
+        cancel.clicked.connect(dlg.reject)
+
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            return result
+        return None
+
+
+class Open3DViewerThread(QThread):
+    """Run an Open3D visualizer in a background QThread to avoid blocking the UI."""
+    def __init__(self, geometry, settings=None, window_name="Open3D Viewer"):
+        super().__init__()
+        self.geometry = geometry
+        self.settings = settings or {}
+        self.window_name = window_name
+
+    def run(self):
+        try:
+            vis = o3d.visualization.Visualizer()
+            vis.create_window(window_name=self.window_name)
+            vis.add_geometry(self.geometry)
+            opt = vis.get_render_option()
+            if 'point_size' in self.settings:
+                try:
+                    opt.point_size = float(self.settings['point_size'])
+                except Exception:
+                    pass
+            if 'bg_rgb' in self.settings:
+                rgb = self.settings['bg_rgb']
+                try:
+                    opt.background_color = np.asarray([rgb[0]/255.0, rgb[1]/255.0, rgb[2]/255.0])
+                except Exception:
+                    pass
+            vis.run()
+            vis.destroy_window()
+        except Exception:
+            # If Open3D fails inside the thread, we can't show a QMessageBox here safely
+            pass
+
+
+def _open3d_viewer_with_settings(geometry, render_settings=None, window_name="Open3D Viewer"):
+    vis = o3d.visualization.Visualizer()
+    vis.create_window(window_name=window_name)
+    vis.add_geometry(geometry)
+    ctr = vis.get_view_control()
+    opt = vis.get_render_option()
+    if render_settings:
+        if 'point_size' in render_settings:
+            try:
+                opt.point_size = float(render_settings['point_size'])
+            except Exception:
+                pass
+        if 'bg' in render_settings:
+            if render_settings['bg'] == 'light':
+                opt.background_color = np.asarray([1.0, 1.0, 1.0])
+            else:
+                opt.background_color = np.asarray([0.0, 0.0, 0.0])
+    vis.run()
+    vis.destroy_window()
 
 class LoadDialog(QDialog):
     """
     A dialog window that allows users to load different types of files.
     Each button opens a file dialog specific to that file type.
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, close_on_load=True):
         super().__init__(parent)
         self.setWindowTitle("Load Options")
+        # store loaded files local to dialog until user closes (MainWindow will pull them)
         self.loaded_files = {"jpeg_png": [], "npy": [], "ply": [], "stl": []}
-        self.setFixedSize(300, 200)
+        self.setFixedSize(320, 220)
+        # whether the dialog should close automatically after selecting files
+        self.close_on_load = bool(close_on_load)
         
         layout = QVBoxLayout(self)
 
@@ -62,9 +427,15 @@ class LoadDialog(QDialog):
         file_dialog.setNameFilter(name_filter)
         if file_dialog.exec():
             selected_files = file_dialog.selectedFiles()
-            self.loaded_files[file_type].extend(selected_files)
+            # extend without duplicates
+            for p in selected_files:
+                if p not in self.loaded_files[file_type]:
+                    self.loaded_files[file_type].append(p)
+
             QMessageBox.information(self, title, "Loaded:\n" + "\n".join(selected_files))
-            self.accept() # Close the dialog after successful loading
+            # Only close if configured to do so
+            if self.close_on_load:
+                self.accept()
 
     def load_jpeg_png(self):
         """Opens a dialog to load JPEG or PNG images."""
@@ -128,6 +499,19 @@ class MainWindow(QMainWindow):
         self.camera_found = True
         self.active_menu = None
 
+        # Settings (persisted)
+        self.settings_path = os.path.join(os.path.expanduser('~'), '.custom_nail_solutions_settings.json')
+        # defaults
+        self.settings = {
+            'default_save_dir': os.path.expanduser('~'),
+            'thumbnail_width': 200,
+            'close_load_dialog_on_select': True
+        }
+        self._load_settings()
+
+        # Keep track of running Open3D viewer threads so they are not GC'd
+        self._o3d_threads = []
+
         # --- UI Setup ---
         main_widget = QWidget(self)
         self.setCentralWidget(main_widget)
@@ -178,6 +562,10 @@ class MainWindow(QMainWindow):
         self.content_widget = QWidget()
         self.content_layout = QVBoxLayout(self.content_widget)
         self.stream_label = QLabel(self)
+        # Camera status label
+        self.camera_status_label = QLabel("Camera: Unknown", self)
+        self.camera_status_label.setStyleSheet("color: gray; font-weight: bold;")
+        self.content_layout.addWidget(self.camera_status_label)
         self.content_layout.addWidget(self.stream_label)
         self.content_area.setWidget(self.content_widget)
         self.content_area.setWidgetResizable(True)
@@ -186,14 +574,24 @@ class MainWindow(QMainWindow):
 
         # --- Connect Signals ---
         self._connect_signals()
+        # Update camera status indicator at startup
+        self._update_camera_status_label()
 
     def _connect_signals(self):
         """Centralized method to connect all UI signals to their slots."""
         # Menu options
+        # Menu layout options: ["Save", "Load", "View Loaded Files", "Settings"]
+        save_button = self.menu.layout.itemAt(0).widget()
+        save_button.clicked.connect(self.save_loaded_files)
+
         load_button = self.menu.layout.itemAt(1).widget()
         load_button.clicked.connect(self.open_load_dialog)
+
         view_loaded_button = self.menu.layout.itemAt(2).widget()
         view_loaded_button.clicked.connect(self.view_loaded_files)
+
+        settings_button = self.menu.layout.itemAt(3).widget()
+        settings_button.clicked.connect(self.open_settings_dialog)
 
         # Processes options
         live_feed_button = self.processes_menu.layout.itemAt(0).widget()
@@ -205,12 +603,41 @@ class MainWindow(QMainWindow):
         generate_pcd_button = self.processes_menu.layout.itemAt(3).widget()
         generate_pcd_button.clicked.connect(self.generate_point_cloud)
 
+        # View menu options (View Image, View PointCloud, View Mesh)
+        try:
+            view_image_btn = self.view_menu.layout.itemAt(0).widget()
+            view_image_btn.clicked.connect(self.view_image)
+            view_pcd_btn = self.view_menu.layout.itemAt(1).widget()
+            view_pcd_btn.clicked.connect(self.view_pointcloud)
+            view_mesh_btn = self.view_menu.layout.itemAt(2).widget()
+            view_mesh_btn.clicked.connect(self.view_mesh)
+        except Exception:
+            # if for some reason menu items are missing, ignore silently
+            pass
+
     def closeEvent(self, event):
         """Ensures the camera thread is stopped gracefully on application exit."""
         if self.capture_thread and self.capture_thread.isRunning():
             self.capture_thread.stop()
             self.capture_thread.wait()
         event.accept()
+
+    def _check_camera_connected(self):
+        """Return True if a RealSense camera is connected, False otherwise."""
+        try:
+            context = rs.context()
+            return bool(context.query_devices())
+        except Exception:
+            return False
+
+    def _update_camera_status_label(self):
+        connected = self._check_camera_connected()
+        if connected:
+            self.camera_status_label.setText("Camera: Connected")
+            self.camera_status_label.setStyleSheet("color: green; font-weight: bold;")
+        else:
+            self.camera_status_label.setText("Camera: Disconnected")
+            self.camera_status_label.setStyleSheet("color: red; font-weight: bold;")
 
     def _set_active_menu(self, menu_to_toggle):
         """
@@ -235,6 +662,27 @@ class MainWindow(QMainWindow):
             self.active_menu = None
             self.content_area.setVisible(False)
 
+    def _choose_loaded_file(self, key, caption='Select file'):
+        """If multiple files are loaded for `key`, prompt the user to choose one.
+
+        Returns the chosen file path or None.
+        """
+        files = self.loaded_files.get(key) or []
+        if not files:
+            return None
+        if len(files) == 1:
+            return files[0]
+
+        # Ask the user to choose from the loaded files
+        items = [os.path.basename(p) for p in files]
+        item, ok = QInputDialog.getItem(self, caption, 'Choose file:', items, 0, False)
+        if ok and item:
+            # find full path
+            for p in files:
+                if os.path.basename(p) == item:
+                    return p
+        return None
+
     def toggle_menu(self):
         self._set_active_menu(self.menu)
 
@@ -245,10 +693,44 @@ class MainWindow(QMainWindow):
         self._set_active_menu(self.view_menu)
 
     def open_load_dialog(self):
-        dialog = LoadDialog(self)
+        dialog = LoadDialog(self, close_on_load=self.settings.get('close_load_dialog_on_select', True))
         if dialog.exec():
+            # Only add existing files and avoid duplicates
             for key in self.loaded_files:
-                self.loaded_files[key].extend(dialog.loaded_files[key])
+                for fp in dialog.loaded_files.get(key, []):
+                    if not os.path.exists(fp):
+                        # Inform the user but continue
+                        QMessageBox.warning(self, "File Not Found", f"Skipped missing file: {fp}")
+                        continue
+                    if fp not in self.loaded_files[key]:
+                        self.loaded_files[key].append(fp)
+
+            # If the user currently has the view open, refresh it
+            if self.view_loaded_files_active:
+                # Rebuild view to reflect new files
+                self.clear_view_loaded_files()
+                self.view_loaded_files()
+
+    def _load_settings(self):
+        try:
+            if os.path.exists(self.settings_path):
+                with open(self.settings_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                    # only update keys we know
+                    for k in self.settings.keys():
+                        if k in data:
+                            self.settings[k] = data[k]
+        except Exception:
+            # ignore settings load problems
+            pass
+
+    def _save_settings(self):
+        try:
+            with open(self.settings_path, 'w', encoding='utf-8') as f:
+                json.dump(self.settings, f, indent=2)
+        except Exception:
+            # best-effort; ignore
+            pass
 
     def remove_file(self, file_type, file_path, widget_to_remove):
         if file_path in self.loaded_files[file_type]:
@@ -327,7 +809,7 @@ class MainWindow(QMainWindow):
         
         self.content_layout.addStretch()
 
-    def view_ply_file(self, file_path):
+    def view_ply_file(self, file_path, render_settings=None):
         try:
             geometry = o3d.io.read_triangle_mesh(file_path)
             if not geometry.has_triangles():
@@ -335,42 +817,146 @@ class MainWindow(QMainWindow):
             if geometry.is_empty():
                 QMessageBox.warning(self, "Error", f"Unable to load valid geometry from {os.path.basename(file_path)}")
                 return
-            o3d.visualization.draw([geometry], window_name=f"Viewing {os.path.basename(file_path)}")
+            # Run viewer in background thread to avoid blocking the UI
+            viewer = Open3DViewerThread(geometry, settings=render_settings, window_name=f"Viewing {os.path.basename(file_path)}")
+            self._o3d_threads.append(viewer)
+            # remove from list when finished
+            viewer.finished.connect(lambda _, v=viewer: self._o3d_threads.remove(v) if v in self._o3d_threads else None)
+            viewer.start()
         except Exception as e:
             QMessageBox.critical(self, "Open3D Error", f"Could not read file: {e}")
 
-    def view_stl_file(self, file_path):
+    def view_stl_file(self, file_path, render_settings=None):
         try:
             geometry = o3d.io.read_triangle_mesh(file_path)
             if not geometry.has_triangles():
                 QMessageBox.warning(self, "Error", f"Unable to load valid geometry from {os.path.basename(file_path)}")
                 return
             geometry.compute_vertex_normals()
-            o3d.visualization.draw_geometries([geometry], window_name=f"Viewing {os.path.basename(file_path)}")
+            viewer = Open3DViewerThread(geometry, settings=render_settings, window_name=f"Viewing {os.path.basename(file_path)}")
+            self._o3d_threads.append(viewer)
+            viewer.finished.connect(lambda _, v=viewer: self._o3d_threads.remove(v) if v in self._o3d_threads else None)
+            viewer.start()
         except Exception as e:
             QMessageBox.critical(self, "Open3D Error", f"Could not read file: {e}")
 
+    def view_image(self):
+        """Show an image from loaded files or ask the user to pick one."""
+        try:
+            # If multiple images are loaded, prompt the user to choose which one
+            img_path = self._choose_loaded_file('jpeg_png', caption='Select image to view')
+            if not img_path:
+                # fallback to file dialog
+                options = QFileDialog.Options()
+                options |= QFileDialog.Option.DontUseNativeDialog
+                filename, _ = QFileDialog.getOpenFileName(self, "Open Image", self.settings.get('default_save_dir', os.path.expanduser('~')), "Images (*.png *.jpg *.jpeg);;All Files (*)", options=options)
+                if filename:
+                    img_path = filename
+
+            if not img_path or not os.path.exists(img_path):
+                QMessageBox.warning(self, "No Image", "No image file available to view.")
+                return
+
+            # Show the image in a zoomable dialog
+            iv = ImageViewerDialog(img_path, parent=self, initial_width=self.settings.get('thumbnail_width', 200)*2)
+            iv.exec()
+        except Exception as e:
+            QMessageBox.critical(self, "View Image Error", f"Failed to show image: {e}")
+
+    def view_pointcloud(self):
+        """Open a point cloud (PLY) from loaded files or ask the user to pick one."""
+        try:
+            pc_path = self._choose_loaded_file('ply', caption='Select point cloud to view')
+            if not pc_path:
+                options = QFileDialog.Options()
+                options |= QFileDialog.Option.DontUseNativeDialog
+                filename, _ = QFileDialog.getOpenFileName(self, "Open Point Cloud", self.settings.get('default_save_dir', os.path.expanduser('~')), "PLY Files (*.ply);;All Files (*)", options=options)
+                if filename:
+                    pc_path = filename
+
+            if not pc_path or not os.path.exists(pc_path):
+                QMessageBox.warning(self, "No Point Cloud", "No PLY point cloud available to view.")
+                return
+
+            # Ask for render settings then show
+            settings = RenderSettingsDialog.get_settings(parent=self)
+            self.view_ply_file(pc_path, render_settings=settings)
+        except Exception as e:
+            QMessageBox.critical(self, "View PointCloud Error", f"Failed to open point cloud: {e}")
+
+    def view_mesh(self):
+        """Open a mesh file (STL preferred, fallback to PLY) from loaded files or ask the user to pick one."""
+        try:
+            # Prefer STL if available, otherwise allow user to pick
+            mesh_path = None
+            if self.loaded_files.get('stl'):
+                mesh_path = self._choose_loaded_file('stl', caption='Select STL to view')
+            if not mesh_path and self.loaded_files.get('ply'):
+                mesh_path = self._choose_loaded_file('ply', caption='Select PLY to view')
+            if not mesh_path:
+                options = QFileDialog.Options()
+                options |= QFileDialog.Option.DontUseNativeDialog
+                filename, _ = QFileDialog.getOpenFileName(self, "Open Mesh", self.settings.get('default_save_dir', os.path.expanduser('~')), "STL Files (*.stl);;PLY Files (*.ply);;All Files (*)", options=options)
+                if filename:
+                    mesh_path = filename
+
+            if not mesh_path or not os.path.exists(mesh_path):
+                QMessageBox.warning(self, "No Mesh", "No mesh file available to view.")
+                return
+
+            # Dispatch based on extension and allow render settings
+            settings = RenderSettingsDialog.get_settings(parent=self)
+            ext = os.path.splitext(mesh_path)[1].lower()
+            if ext == '.stl':
+                self.view_stl_file(mesh_path, render_settings=settings)
+            else:
+                self.view_ply_file(mesh_path, render_settings=settings)
+        except Exception as e:
+            QMessageBox.critical(self, "View Mesh Error", f"Failed to open mesh: {e}")
+
     def live_feed(self):
         live_feed_button = self.processes_menu.layout.itemAt(0).widget()
-        if self.capture_thread is None or not self.capture_thread.isRunning():
-            self.capture_thread = ImageCaptureThread()
-            # Connect all signals from the thread
-            self.capture_thread.image_ready.connect(self.update_frame)
-            self.capture_thread.finished.connect(self.capture_finished)
-            self.capture_thread.camera_error.connect(self.handle_camera_error) # Connect new error signal
-            
-            self.capture_thread.start()
-            live_feed_button.setText("Stop Live Feed")
-            self.camera_found = True # Assume camera is found until an error is signaled
-            self.stream_label.clear() # Clear any old content
-        else:
+        # If already running, stop it
+        if self.capture_thread is not None and self.capture_thread.isRunning():
             self.stop_capture()
+            return
+
+        # Otherwise, proactively check for a camera and allow retry
+        while True:
+            try:
+                context = rs.context()
+                if context.query_devices():
+                    break
+                else:
+                    # Ask user to Retry or Cancel
+                    rsp = QMessageBox.question(self, "No Camera", "No RealSense camera connected. Retry?", QMessageBox.StandardButton.Retry | QMessageBox.StandardButton.Cancel)
+                    if rsp == QMessageBox.StandardButton.Retry:
+                        continue
+                    else:
+                        return
+            except Exception:
+                QMessageBox.critical(self, "Camera Error", "Unable to query RealSense devices. Ensure the SDK is installed and a camera is connected.")
+                return
+
+        # Safe to start the feed
+        self.capture_thread = ImageCaptureThread()
+        # Connect all signals from the thread
+        self.capture_thread.image_ready.connect(self.update_frame)
+        self.capture_thread.finished.connect(self.capture_finished)
+        self.capture_thread.camera_error.connect(self.handle_camera_error) # Connect new error signal
+
+        self.capture_thread.start()
+        live_feed_button.setText("Stop Live Feed")
+        self.camera_found = True # Assume camera is found until an error is signaled
+        self.stream_label.clear() # Clear any old content
+        self._update_camera_status_label()
 
     def stop_capture(self):
         if self.capture_thread and self.capture_thread.isRunning():
             self.capture_thread.stop()
             live_feed_button = self.processes_menu.layout.itemAt(0).widget()
             live_feed_button.setText("Live Feed")
+            self._update_camera_status_label()
 
     def capture_finished(self):
         live_feed_button = self.processes_menu.layout.itemAt(0).widget()
@@ -381,6 +967,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Capture", "Live Feed stopped.")
         
         self.capture_thread = None
+        self._update_camera_status_label()
 
     def handle_camera_error(self, message):
         """
@@ -394,6 +981,7 @@ class MainWindow(QMainWindow):
         live_feed_button = self.processes_menu.layout.itemAt(0).widget()
         live_feed_button.setText("Live Feed")
         self.capture_thread = None # Ensure thread is cleared
+        self._update_camera_status_label()
 
 
     def update_frame(self, color_image):
@@ -405,6 +993,17 @@ class MainWindow(QMainWindow):
 
     def capture_images(self):
         """Capture images from the camera."""
+        # Proactively check for a connected RealSense camera before opening the dialog
+        try:
+            context = rs.context()
+            if not context.query_devices():
+                QMessageBox.critical(self, "Camera Error", "No RealSense camera connected. Please connect a camera and try again.")
+                return
+        except Exception:
+            # If pyrealsense2 is not available or something goes wrong, block the action
+            QMessageBox.critical(self, "Camera Error", "Unable to query RealSense devices. Ensure the SDK is installed and a camera is connected.")
+            return
+
         dialog = CaptureDialog(self)
 
         if dialog.exec():
@@ -478,6 +1077,146 @@ class MainWindow(QMainWindow):
                     # Stop streaming when done
                     pipeline.stop()
                     QMessageBox.information(self, "Capture Images", "Image capture completed.")
+
+    def save_loaded_files(self):
+        """Save the current list of loaded files to a JSON file chosen by the user.
+
+        The saved file will contain a JSON object with keys matching the file
+        categories (jpeg_png, npy, ply, stl) and lists of absolute paths.
+        """
+        try:
+            options = QFileDialog.Options()
+            options |= QFileDialog.Option.DontUseNativeDialog
+            filename, _ = QFileDialog.getSaveFileName(self, "Save Loaded Files", "loaded_files.json", "JSON Files (*.json);;All Files (*)", options=options)
+            if not filename:
+                return
+
+            # Ensure absolute paths
+            export_data = {k: [os.path.abspath(p) for p in v] for k, v in self.loaded_files.items()}
+            with open(filename, "w", encoding="utf-8") as f:
+                json.dump(export_data, f, indent=2)
+
+            QMessageBox.information(self, "Save", f"Loaded files saved to:\n{filename}")
+        except Exception as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save loaded files: {e}")
+
+    def open_settings_dialog(self):
+        """Open a lightweight settings dialog. Currently provides 'Clear All Loaded Files'."""
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Settings")
+        dlg.setFixedSize(420, 300)
+        layout = QVBoxLayout(dlg)
+
+        # Default save directory
+        dir_layout = QHBoxLayout()
+        dir_label = QLabel("Default save directory:")
+        dir_layout.addWidget(dir_label)
+        dir_btn = QPushButton(os.path.basename(self.settings.get('default_save_dir', os.path.expanduser('~'))))
+        dir_btn.clicked.connect(self._choose_default_save_dir)
+        dir_layout.addWidget(dir_btn)
+        layout.addLayout(dir_layout)
+
+        # Thumbnail width
+        thumb_layout = QHBoxLayout()
+        thumb_layout.addWidget(QLabel("Thumbnail width:"))
+        thumb_spin = QSpinBox(dlg)
+        thumb_spin.setRange(50, 800)
+        thumb_spin.setValue(self.settings.get('thumbnail_width', 200))
+        thumb_layout.addWidget(thumb_spin)
+        layout.addLayout(thumb_layout)
+
+        # Close-on-load checkbox
+        close_cb = QCheckBox("Close load dialog after selecting files")
+        close_cb.setChecked(bool(self.settings.get('close_load_dialog_on_select', True)))
+        layout.addWidget(close_cb)
+
+        # Import previously saved loaded_files JSON
+        import_btn = QPushButton("Import saved loaded_files JSON")
+        import_btn.clicked.connect(self._import_loaded_files_json)
+        layout.addWidget(import_btn)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        save_btn = QPushButton("Save Settings")
+        save_btn.setStyleSheet("background-color: #4CAF50; color: white; font-weight: bold;")
+        save_btn.clicked.connect(lambda: self._apply_and_save_settings(thumb_spin.value(), close_cb.isChecked(), dlg))
+        btn_row.addWidget(save_btn)
+
+        clear_btn = QPushButton("Clear All Loaded Files")
+        clear_btn.setStyleSheet("background-color: #d9534f; color: white; font-weight: bold;")
+        clear_btn.clicked.connect(lambda: self._confirm_and_clear_all(dlg))
+        btn_row.addWidget(clear_btn)
+
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(dlg.accept)
+        btn_row.addWidget(close_btn)
+
+        layout.addLayout(btn_row)
+
+        dlg.exec()
+
+    def _choose_default_save_dir(self):
+        dlg = QFileDialog(self)
+        dlg.setFileMode(QFileDialog.FileMode.Directory)
+        dlg.setOption(QFileDialog.Option.ShowDirsOnly, True)
+        if dlg.exec():
+            sel = dlg.selectedFiles()
+            if sel:
+                self.settings['default_save_dir'] = sel[0]
+                # persist immediately
+                self._save_settings()
+
+    def _apply_and_save_settings(self, thumbnail_width, close_on_load, dialog_ref=None):
+        try:
+            self.settings['thumbnail_width'] = int(thumbnail_width)
+        except Exception:
+            self.settings['thumbnail_width'] = 200
+        self.settings['close_load_dialog_on_select'] = bool(close_on_load)
+        self._save_settings()
+        QMessageBox.information(self, "Settings", "Settings saved.")
+        if dialog_ref and isinstance(dialog_ref, QDialog):
+            dialog_ref.accept()
+
+    def _import_loaded_files_json(self):
+        options = QFileDialog.Options()
+        options |= QFileDialog.Option.DontUseNativeDialog
+        filename, _ = QFileDialog.getOpenFileName(self, "Import loaded_files JSON", self.settings.get('default_save_dir', os.path.expanduser('~')), "JSON Files (*.json);;All Files (*)", options=options)
+        if not filename:
+            return
+        try:
+            with open(filename, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+                # only accept known keys
+                for k in ['jpeg_png', 'npy', 'ply', 'stl']:
+                    for p in data.get(k, []):
+                        if os.path.exists(p) and p not in self.loaded_files[k]:
+                            self.loaded_files[k].append(p)
+            QMessageBox.information(self, "Import", f"Imported entries from {os.path.basename(filename)}")
+            if self.view_loaded_files_active:
+                self.clear_view_loaded_files()
+                self.view_loaded_files()
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", f"Failed to import JSON: {e}")
+
+    def _confirm_and_clear_all(self, dialog_parent=None):
+        resp = QMessageBox.question(self, "Clear All", "Remove all loaded files from the application? This cannot be undone.", QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if resp == QMessageBox.StandardButton.Yes:
+            self.clear_all_loaded_files()
+            if dialog_parent and isinstance(dialog_parent, QDialog):
+                # keep settings dialog open so user can see result; don't auto-close
+                pass
+
+    def clear_all_loaded_files(self):
+        """Clear all loaded files from the application state and refresh UI if needed."""
+        for k in list(self.loaded_files.keys()):
+            self.loaded_files[k].clear()
+
+        # If currently viewing loaded files, clear the view and hide area
+        if self.view_loaded_files_active:
+            self.clear_view_loaded_files()
+            self.content_area.setVisible(False)
+
+        QMessageBox.information(self, "Cleared", "All loaded files have been removed.")
 
     def run_neural_network(self):
         QMessageBox.information(self, "Run Neural Network", "This feature is not yet implemented.")
