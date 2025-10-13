@@ -1222,8 +1222,11 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Run Neural Network", "This feature is not yet implemented.")
 
     def generate_point_cloud(self):
-        QMessageBox.information(self, "Generate Point Cloud", "This feature is not yet implemented.")
+        QMessageBox.information(self, "Generate Point Cloud", "Run servo sweep...")
 
+        import subprocess
+        subprocess.run(["sudo", "python3", "/home/orangepi/Documents/repos/Custom-Nail-Solutions/Test Scripts/servo_pwm.py"]) # Runs servo sweep code
+        
 class CaptureDialog(QDialog):
     """
     A dialog to get user input for the number of frames, delay, and filename
