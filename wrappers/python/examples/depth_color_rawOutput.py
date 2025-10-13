@@ -4,7 +4,7 @@ import cv2
 import os
 import time
 
-def capture_raw_frames(num_frames, save_dir="raw_frames"):
+def capture_raw_frames(num_frames, save_dir="raw_frames", file_name="raw_frame"):
     """
     Captures raw depth and color frames from an Intel RealSense camera and saves them.
     - Depth frames are saved in both .npy (raw 16-bit) and .png (normalized 8-bit) formats.
@@ -45,12 +45,12 @@ def capture_raw_frames(num_frames, save_dir="raw_frames"):
             depth_normalized = np.uint8(depth_normalized)  # Convert to uint8 for saving as PNG
             
             # Save depth images
-            np.save(f"{save_dir}/hand1_depth_frame_{i+1}.npy", depth_image)  # Raw 16-bit depth
-            cv2.imwrite(f"{save_dir}/hand1_depth_frame_{i+1}.png", depth_normalized)  # 8-bit visualization
+            np.save(f"{save_dir}/{file_name}_Depth{i+1}.npy", depth_image)  # Raw 16-bit depth
+            cv2.imwrite(f"{save_dir}/{file_name}_Depth{i+1}.png", depth_normalized)  # 8-bit visualization
             
             # Save color images
-            cv2.imwrite(f"{save_dir}/hand1_color_frame_{i+1}.png", color_image)  # Standard 8-bit color image
-            np.save(f"{save_dir}/hand1_color_frame_{i+1}.npy", color_image)  # Raw color data
+            cv2.imwrite(f"{save_dir}/{file_name}_Color{i+1}.png", color_image)  # Standard 8-bit color image
+            np.save(f"{save_dir}/{file_name}_Color{i+1}.npy", color_image)  # Raw color data
             
             print(f"Saved depth and color images for frame {i+1}.")
     
@@ -61,9 +61,10 @@ def capture_raw_frames(num_frames, save_dir="raw_frames"):
 def main():
     """Main function to capture frames based on user input."""
     num_frames = int(input("Enter number of frames to capture: "))
+    file_name = input("Enter base file name (default: 'raw_frame'): ") or "raw_frame"
     print("You have 5 seconds to position your hand...")
     time.sleep(5)  # Allow time for user to position their hand
-    capture_raw_frames(num_frames)
+    capture_raw_frames(num_frames, save_dir="raw_frames", file_name=file_name)
 
 if __name__ == "__main__":
     main()

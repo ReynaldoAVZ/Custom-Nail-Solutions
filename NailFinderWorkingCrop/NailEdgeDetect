@@ -1,0 +1,22 @@
+import cv2
+import numpy as np
+
+# Load the image
+image = cv2.imread('cropped_image0.jpg', cv2.IMREAD_GRAYSCALE)
+
+# Apply Gaussian blur to reduce noise
+blurred_image = cv2.GaussianBlur(image, (5, 5), 0)
+
+# Apply Canny edge detection
+edges = cv2.Canny(blurred_image, 5, 40) #50, 150
+
+# Find contours of the edges
+contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+# Draw contours on the original image
+cv2.drawContours(image, contours, -1, (0, 255, 0), 2)
+
+# Display the result
+cv2.imshow('Nail Edges', image)
+cv2.waitKey(0)
+cv2.destroyAllWindows()
