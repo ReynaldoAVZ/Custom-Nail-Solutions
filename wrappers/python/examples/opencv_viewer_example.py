@@ -7,7 +7,7 @@
 
 import pyrealsense2 as rs
 import numpy as np
-import cv2
+import cv2  
 
 # Configure depth and color streams
 pipeline = rs.pipeline()
