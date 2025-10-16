@@ -1222,9 +1222,122 @@ class MainWindow(QMainWindow):
         QMessageBox.information(self, "Run Neural Network", "This feature is not yet implemented.")
 
     def generate_point_cloud(self):
-        QMessageBox.information(self, "Generate Point Cloud", "Run servo sweep...")
+        """
+        Generates a point cloud using TSDF fusion from multiple depth images captured at different angles.
+        Uses Open3D's integration pipeline to combine the depth images into a single point cloud.
+        """
+        try:
+            # Initialize RealSense pipeline
+            pipeline = rs.pipeline()
+            config = rs.config()
+            config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            
+            # Start streaming
+            profile = pipeline.start(config)
+            
+            # Get camera intrinsics
+            depth_stream = profile.get_stream(rs.stream.depth)
+            intr = depth_stream.as_video_stream_profile().get_intrinsics()
+            
+            # Create Open3D camera intrinsic object
+            intrinsic = o3d.camera.PinholeCameraIntrinsic(
+                width=intr.width,
+                height=intr.height,
+                fx=intr.fx,
+                fy=intr.fy,
+                cx=intr.ppx,
+                cy=intr.ppy
+            )
 
-        import subprocess
+            # TODO: Set up servo control for rotation
+            # Example: angles = [0, 45, 90, 135, 180, 225, 270, 315]  # 45-degree intervals
+            
+            # TSDF Parameters
+            voxel_length = 0.01    # 1cm voxel size - adjust based on your needs
+            sdf_trunc = 0.04       # Truncation distance for TSDF - typically 4x voxel size
+            
+            # Create a TSDF volume
+            volume = o3d.pipelines.integration.ScalableTSDFVolume(
+                voxel_length=voxel_length,
+                sdf_trunc=sdf_trunc,
+                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+            )
+
+            # TODO: Set up transformation matrices for each angle
+            # For each angle, you'll need:
+            # - Rotation matrix based on the servo angle
+            # - Translation matrix if the camera's center of rotation isn't at the optical center
+            # Example for one angle:
+            # angle_rad = math.radians(current_angle)
+            # rotation = np.array([
+            #     [math.cos(angle_rad), 0, math.sin(angle_rad)],
+            #     [0, 1, 0],
+            #     [-math.sin(angle_rad), 0, math.cos(angle_rad)]
+            # ])
+            # translation = np.array([0, 0, 0])  # Adjust based on your setup
+            # extrinsic = np.eye(4)
+            # extrinsic[:3, :3] = rotation
+            # extrinsic[:3, 3] = translation
+
+            try:
+                # For each angle position:
+                # TODO: Replace with actual servo control
+                for i in range(8):  # Example: 8 positions
+                    # TODO: Move servo to next angle
+                    # time.sleep(1)  # Wait for servo to stabilize
+                    
+                    # Capture frame
+                    frames = pipeline.wait_for_frames()
+                    depth_frame = frames.get_depth_frame()
+                    color_frame = frames.get_color_frame()
+                    
+                    if not depth_frame or not color_frame:
+                        continue
+                        
+                    # Convert frames to Open3D format
+                    depth_image = o3d.geometry.Image(
+                        np.array(depth_frame.get_data())
+                    )
+                    color_image = o3d.geometry.Image(
+                        np.array(color_frame.get_data()))
+                    
+                    # TODO: Calculate extrinsic matrix for current angle
+                    extrinsic = np.eye(4)  # Placeholder - replace with actual transform
+                    
+                    # Integrate into TSDF volume
+                    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                        color_image, 
+                        depth_image,
+                        depth_scale=1000.0,  # RealSense depth is in millimeters
+                        depth_trunc=5.0,     # 5m truncation
+                        convert_rgb_to_intensity=False
+                    )
+                    volume.integrate(
+                        rgbd,
+                        intrinsic,
+                        extrinsic
+                    )
+                
+                # Extract mesh and convert to point cloud
+                mesh = volume.extract_triangle_mesh()
+                pcd = mesh.sample_points_uniformly(number_of_points=100000)
+                
+                # Save the point cloud
+                timestamp = time.strftime("%Y%m%d-%H%M%S")
+                save_path = os.path.join(self.settings.get('default_save_dir', os.path.expanduser('~')), f'tsdf_fusion_{timestamp}.ply')
+                o3d.io.write_point_cloud(save_path, pcd)
+                
+                # Add to loaded files and show success
+                if save_path not in self.loaded_files['ply']:
+                    self.loaded_files['ply'].append(save_path)
+                QMessageBox.information(self, "Success", f"Point cloud saved to: {save_path}")
+                
+            finally:
+                pipeline.stop()
+                
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to generate point cloud: {str(e)}")
         subprocess.run(["sudo", "python3", "/home/orangepi/Documents/repos/Custom-Nail-Solutions/Test Scripts/servo_pwm.py"]) # Runs servo sweep code
         
 class CaptureDialog(QDialog):
