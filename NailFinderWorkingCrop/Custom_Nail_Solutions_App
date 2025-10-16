@@ -6,12 +6,15 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtWidgets import QInputDialog
 from PyQt6.QtGui import (QPixmap, QImage, QPainter, QColor, QFont, QPalette)
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from rpi_hardware_pwm import HardwarePWM
 import open3d as o3d
 import sys
 import os
+sys.path.append('/home/raspberrypi/librealsense/wrappers/python')
 import pyrealsense2 as rs
 import numpy as np
 import cv2
+import math
 import time
 import json
 from PyQt6.QtWidgets import QSlider
@@ -985,9 +988,16 @@ class MainWindow(QMainWindow):
 
 
     def update_frame(self, color_image):
-        height, width, channels = color_image.shape
+        # Rotate incoming frame 90 degrees counter-clockwise to correct orientation
+        try:
+            rotated = cv2.rotate(color_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+        except Exception:
+            # If rotation fails for any reason, fall back to original image
+            rotated = color_image
+
+        height, width, channels = rotated.shape
         bytes_per_line = width * channels
-        qimage = QImage(color_image.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
+        qimage = QImage(rotated.data, width, height, bytes_per_line, QImage.Format.Format_BGR888)
         pixmap = QPixmap.fromImage(qimage)
         self.stream_label.setPixmap(pixmap)
 
@@ -1061,6 +1071,16 @@ class MainWindow(QMainWindow):
                         depth_image = np.asanyarray(depth_frame.get_data())  # dtype: uint16 (16-bit depth)
                         color_image = np.asanyarray(color_frame.get_data())  # dtype: uint8 (RGB image)
 
+                        # Rotate both images 90 degrees counter-clockwise so saved files match the on-screen view
+                        try:
+                            depth_image = cv2.rotate(depth_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                        except Exception:
+                            pass
+                        try:
+                            color_image = cv2.rotate(color_image, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                        except Exception:
+                            pass
+
                         # Normalize depth image for visualization (convert to 8-bit)
                         depth_normalized = cv2.normalize(depth_image, None, 0, 255, cv2.NORM_MINMAX)
                         depth_normalized = np.uint8(depth_normalized)  # Convert to uint8 for saving as PNG
@@ -1070,6 +1090,7 @@ class MainWindow(QMainWindow):
                         cv2.imwrite(f"{save_path}/{sanitized_fileName}_Depth{i+1}.png", depth_normalized)  # 8-bit visualization
 
                         # Save color images
+                        # Note: color_image is BGR from RealSense; save as-is to preserve data layout
                         cv2.imwrite(f"{save_path}/{sanitized_fileName}_Color{i+1}.png", color_image)  # Standard 8-bit color image
                         np.save(f"{save_path}/{sanitized_fileName}_Color{i+1}.npy", color_image)  # Raw color data
 
@@ -1227,6 +1248,24 @@ class MainWindow(QMainWindow):
         Uses Open3D's integration pipeline to combine the depth images into a single point cloud.
         """
         try:
+            # Try to initialize a servo controller if available. Servo.value accepts [-1.0 .. 1.0]
+            servo = None
+            servo_enabled = False
+            try:
+                from gpiozero import Servo
+                servo = Servo(18)
+                # start at center
+                try:
+                    servo.value = 0.0
+                except Exception:
+                    pass
+                time.sleep(0.5)
+                servo_enabled = True
+            except Exception:
+                # gpiozero not available or servo init failed; proceed without moving hardware
+                servo = None
+                servo_enabled = False
+
             # Initialize RealSense pipeline
             pipeline = rs.pipeline()
             config = rs.config()
@@ -1249,6 +1288,22 @@ class MainWindow(QMainWindow):
                 cx=intr.ppx,
                 cy=intr.ppy
             )
+
+            # Precompute a rotated intrinsic that matches a 90deg CCW-rotated image.
+            # After rotating 90deg CCW, new width = original height, new height = original width.
+            # fx' = fy, fy' = fx
+            # cx' = ppy, cy' = width - ppx - 1
+            try:
+                rotated_intrinsic = o3d.camera.PinholeCameraIntrinsic(
+                    width=intr.height,
+                    height=intr.width,
+                    fx=intr.fy,
+                    fy=intr.fx,
+                    cx=intr.ppy,
+                    cy=float(intr.width) - float(intr.ppx) - 1.0
+                )
+            except Exception:
+                rotated_intrinsic = intrinsic
 
             # TODO: Set up servo control for rotation
             # Example: angles = [0, 45, 90, 135, 180, 225, 270, 315]  # 45-degree intervals
@@ -1281,43 +1336,97 @@ class MainWindow(QMainWindow):
             # extrinsic[:3, 3] = translation
 
             try:
-                # For each angle position:
-                # TODO: Replace with actual servo control
-                for i in range(8):  # Example: 8 positions
-                    # TODO: Move servo to next angle
-                    # time.sleep(1)  # Wait for servo to stabilize
-                    
+                # For each servo position (from -1.0 to 1.0 in steps of 0.1), move servo, capture frame
+                # and integrate into the TSDF volume using a rotation extrinsic computed from the servo value.
+                # Assumptions:
+                # - servo.value ranges [-1..1] maps to [-90deg .. +90deg]
+                # - rotation is around the vertical axis (Z) and camera is translated downwards by a fixed height
+                angles = np.arange(-0.6, 0.6001, 0.1)
+                for idx, servo_pos in enumerate(angles):
+                    # Move servo if available
+                    if servo_enabled and servo is not None:
+                        try:
+                            servo.value = float(servo_pos)
+                        except Exception:
+                            pass
+
+                    # Wait a short time for the mechanical to settle
+                    time.sleep(0.6)
+
                     # Capture frame
                     frames = pipeline.wait_for_frames()
                     depth_frame = frames.get_depth_frame()
                     color_frame = frames.get_color_frame()
-                    
+
                     if not depth_frame or not color_frame:
                         continue
-                        
-                    # Convert frames to Open3D format
-                    depth_image = o3d.geometry.Image(
-                        np.array(depth_frame.get_data())
-                    )
-                    color_image = o3d.geometry.Image(
-                        np.array(color_frame.get_data()))
-                    
-                    # TODO: Calculate extrinsic matrix for current angle
-                    extrinsic = np.eye(4)  # Placeholder - replace with actual transform
-                    
+
+                    # Convert to numpy arrays first
+                    depth_np = np.array(depth_frame.get_data())
+                    color_np = np.array(color_frame.get_data())
+
+                    # Rotate arrays to match on-screen orientation (90deg CCW)
+                    try:
+                        depth_np = cv2.rotate(depth_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    except Exception:
+                        pass
+                    try:
+                        color_np = cv2.rotate(color_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    except Exception:
+                        pass
+
+                    depth_image = o3d.geometry.Image(depth_np)
+                    color_image = o3d.geometry.Image(color_np)
+
+                    # Map servo position to angle in radians (assume -90..+90 deg)
+                    angle_deg = float(servo_pos) * 90.0
+                    angle_rad = math.radians(angle_deg)
+
+                    # Rotation about X axis (camera pitch). Camera facing down is represented by a translation along Z.
+                    c = math.cos(angle_rad)
+                    s = math.sin(angle_rad)
+                    # Rodrigues for rotation about X: rotates Y/Z
+                    rotation = np.array([
+                        [1.0, 0.0, 0.0],
+                        [0.0,  c, -s],
+                        [0.0,  s,  c]
+                    ], dtype=float)
+
+                    extrinsic = np.eye(4, dtype=float)
+                    extrinsic[:3, :3] = rotation
+                    # Set a fixed camera height (meters) above the origin; adjust to your setup
+                    extrinsic[:3, 3] = np.array([0.0, 0.0, 0.1], dtype=float)
+
                     # Integrate into TSDF volume
                     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                        color_image, 
+                        color_image,
                         depth_image,
                         depth_scale=1000.0,  # RealSense depth is in millimeters
                         depth_trunc=5.0,     # 5m truncation
                         convert_rgb_to_intensity=False
                     )
-                    volume.integrate(
-                        rgbd,
-                        intrinsic,
-                        extrinsic
-                    )
+
+                    # Use rotated_intrinsic when images were rotated so sizes and intrinsics match
+                    try:
+                        volume.integrate(
+                            rgbd,
+                            rotated_intrinsic,
+                            extrinsic
+                        )
+                    except Exception:
+                        # fallback to original intrinsic if integration fails for any reason
+                        volume.integrate(
+                            rgbd,
+                            intrinsic,
+                            extrinsic
+                        )
+
+                # Close servo after capture loop
+                if servo_enabled and servo is not None:
+                    try:
+                        servo.close()
+                    except Exception:
+                        pass
                 
                 # Extract mesh and convert to point cloud
                 mesh = volume.extract_triangle_mesh()
@@ -1338,7 +1447,7 @@ class MainWindow(QMainWindow):
                 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to generate point cloud: {str(e)}")
-        subprocess.run(["sudo", "python3", "/home/orangepi/Documents/repos/Custom-Nail-Solutions/Test Scripts/servo_pwm.py"]) # Runs servo sweep code
+        # subprocess.run(["sudo", "python3", "/home/orangepi/Documents/repos/Custom-Nail-Solutions/Test Scripts/servo_pwm.py"]) # Runs servo sweep code
         
 class CaptureDialog(QDialog):
     """
