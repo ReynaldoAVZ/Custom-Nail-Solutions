@@ -1248,38 +1248,38 @@ class MainWindow(QMainWindow):
         Uses Open3D's integration pipeline to combine the depth images into a single point cloud.
         """
         try:
-            # Try to initialize a servo controller if available. Servo.value accepts [-1.0 .. 1.0]
+            # Initialize servo controller using basic gpiozero (software PWM)
             servo = None
             servo_enabled = False
             try:
                 from gpiozero import Servo
-                servo = Servo(18)
-                # start at center
-                try:
-                    servo.value = 0.0
-                except Exception:
-                    pass
+
+                servo = Servo(
+                    18,
+                    min_pulse_width=500/1000000,
+                    max_pulse_width=2500/1000000
+                )
+                servo.value = 0.0  # Start at center
                 time.sleep(0.5)
                 servo_enabled = True
             except Exception:
-                # gpiozero not available or servo init failed; proceed without moving hardware
                 servo = None
                 servo_enabled = False
+
+            # Helper to map angle (0–270°) to servo.value (-1.0 to +1.0)
+            def angle_to_servo_value(angle_deg, max_angle=270):
+                return (angle_deg / max_angle) * 2.0 - 1.0
 
             # Initialize RealSense pipeline
             pipeline = rs.pipeline()
             config = rs.config()
             config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
             config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            
-            # Start streaming
             profile = pipeline.start(config)
-            
+
             # Get camera intrinsics
             depth_stream = profile.get_stream(rs.stream.depth)
             intr = depth_stream.as_video_stream_profile().get_intrinsics()
-            
-            # Create Open3D camera intrinsic object
             intrinsic = o3d.camera.PinholeCameraIntrinsic(
                 width=intr.width,
                 height=intr.height,
@@ -1289,10 +1289,7 @@ class MainWindow(QMainWindow):
                 cy=intr.ppy
             )
 
-            # Precompute a rotated intrinsic that matches a 90deg CCW-rotated image.
-            # After rotating 90deg CCW, new width = original height, new height = original width.
-            # fx' = fy, fy' = fx
-            # cx' = ppy, cy' = width - ppx - 1
+            # Precompute rotated intrinsic for 90° CCW rotation
             try:
                 rotated_intrinsic = o3d.camera.PinholeCameraIntrinsic(
                     width=intr.height,
@@ -1305,67 +1302,35 @@ class MainWindow(QMainWindow):
             except Exception:
                 rotated_intrinsic = intrinsic
 
-            # TODO: Set up servo control for rotation
-            # Example: angles = [0, 45, 90, 135, 180, 225, 270, 315]  # 45-degree intervals
-            
             # TSDF Parameters
-            voxel_length = 0.01    # 1cm voxel size - adjust based on your needs
-            sdf_trunc = 0.04       # Truncation distance for TSDF - typically 4x voxel size
-            
-            # Create a TSDF volume
+            voxel_length = 0.01
+            sdf_trunc = 0.04
             volume = o3d.pipelines.integration.ScalableTSDFVolume(
                 voxel_length=voxel_length,
                 sdf_trunc=sdf_trunc,
                 color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
             )
 
-            # TODO: Set up transformation matrices for each angle
-            # For each angle, you'll need:
-            # - Rotation matrix based on the servo angle
-            # - Translation matrix if the camera's center of rotation isn't at the optical center
-            # Example for one angle:
-            # angle_rad = math.radians(current_angle)
-            # rotation = np.array([
-            #     [math.cos(angle_rad), 0, math.sin(angle_rad)],
-            #     [0, 1, 0],
-            #     [-math.sin(angle_rad), 0, math.cos(angle_rad)]
-            # ])
-            # translation = np.array([0, 0, 0])  # Adjust based on your setup
-            # extrinsic = np.eye(4)
-            # extrinsic[:3, :3] = rotation
-            # extrinsic[:3, 3] = translation
-
             try:
-                # For each servo position (from -1.0 to 1.0 in steps of 0.1), move servo, capture frame
-                # and integrate into the TSDF volume using a rotation extrinsic computed from the servo value.
-                # Assumptions:
-                # - servo.value ranges [-1..1] maps to [-90deg .. +90deg]
-                # - rotation is around the vertical axis (Z) and camera is translated downwards by a fixed height
-                angles = np.arange(-0.6, 0.6001, 0.1)
-                for idx, servo_pos in enumerate(angles):
-                    # Move servo if available
+                angles = [80, 100, 120, 140, 160, 180, 200, 220]
+                for angle_deg in angles:
                     if servo_enabled and servo is not None:
                         try:
-                            servo.value = float(servo_pos)
+                            servo.value = angle_to_servo_value(angle_deg)
                         except Exception:
                             pass
 
-                    # Wait a short time for the mechanical to settle
-                    time.sleep(0.6)
+                    time.sleep(.5)  # Allow servo to settle
 
-                    # Capture frame
                     frames = pipeline.wait_for_frames()
                     depth_frame = frames.get_depth_frame()
                     color_frame = frames.get_color_frame()
-
                     if not depth_frame or not color_frame:
                         continue
 
-                    # Convert to numpy arrays first
                     depth_np = np.array(depth_frame.get_data())
                     color_np = np.array(color_frame.get_data())
 
-                    # Rotate arrays to match on-screen orientation (90deg CCW)
                     try:
                         depth_np = cv2.rotate(depth_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
                     except Exception:
@@ -1378,14 +1343,9 @@ class MainWindow(QMainWindow):
                     depth_image = o3d.geometry.Image(depth_np)
                     color_image = o3d.geometry.Image(color_np)
 
-                    # Map servo position to angle in radians (assume -90..+90 deg)
-                    angle_deg = float(servo_pos) * 90.0
                     angle_rad = math.radians(angle_deg)
-
-                    # Rotation about X axis (camera pitch). Camera facing down is represented by a translation along Z.
                     c = math.cos(angle_rad)
                     s = math.sin(angle_rad)
-                    # Rodrigues for rotation about X: rotates Y/Z
                     rotation = np.array([
                         [1.0, 0.0, 0.0],
                         [0.0,  c, -s],
@@ -1394,60 +1354,44 @@ class MainWindow(QMainWindow):
 
                     extrinsic = np.eye(4, dtype=float)
                     extrinsic[:3, :3] = rotation
-                    # Set a fixed camera height (meters) above the origin; adjust to your setup
-                    extrinsic[:3, 3] = np.array([0.0, 0.0, 0.1], dtype=float)
+                    extrinsic[:3, 3] = np.array([0.0, 0.0, 0.05], dtype=float)
 
-                    # Integrate into TSDF volume
                     rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
                         color_image,
                         depth_image,
-                        depth_scale=1000.0,  # RealSense depth is in millimeters
-                        depth_trunc=5.0,     # 5m truncation
+                        depth_scale=1000.0,
+                        depth_trunc=5.0,
                         convert_rgb_to_intensity=False
                     )
 
-                    # Use rotated_intrinsic when images were rotated so sizes and intrinsics match
                     try:
-                        volume.integrate(
-                            rgbd,
-                            rotated_intrinsic,
-                            extrinsic
-                        )
+                        volume.integrate(rgbd, rotated_intrinsic, extrinsic)
                     except Exception:
-                        # fallback to original intrinsic if integration fails for any reason
-                        volume.integrate(
-                            rgbd,
-                            intrinsic,
-                            extrinsic
-                        )
+                        volume.integrate(rgbd, intrinsic, extrinsic)
 
-                # Close servo after capture loop
                 if servo_enabled and servo is not None:
                     try:
                         servo.close()
                     except Exception:
                         pass
-                
-                # Extract mesh and convert to point cloud
+
                 mesh = volume.extract_triangle_mesh()
                 pcd = mesh.sample_points_uniformly(number_of_points=100000)
-                
-                # Save the point cloud
+
                 timestamp = time.strftime("%Y%m%d-%H%M%S")
                 save_path = os.path.join(self.settings.get('default_save_dir', os.path.expanduser('~')), f'tsdf_fusion_{timestamp}.ply')
                 o3d.io.write_point_cloud(save_path, pcd)
-                
-                # Add to loaded files and show success
+
                 if save_path not in self.loaded_files['ply']:
                     self.loaded_files['ply'].append(save_path)
                 QMessageBox.information(self, "Success", f"Point cloud saved to: {save_path}")
-                
+
             finally:
                 pipeline.stop()
-                
+
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to generate point cloud: {str(e)}")
-        # subprocess.run(["sudo", "python3", "/home/orangepi/Documents/repos/Custom-Nail-Solutions/Test Scripts/servo_pwm.py"]) # Runs servo sweep code
+
         
 class CaptureDialog(QDialog):
     """
