@@ -21,7 +21,7 @@ from PyQt6.QtWidgets import QSlider
 from PyQt6.QtWidgets import QColorDialog
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QMouseEvent
-import threading
+import serial
 
 
 class ImageViewerDialog(QDialog):
@@ -1244,153 +1244,121 @@ class MainWindow(QMainWindow):
 
     def generate_point_cloud(self):
         """
-        Generates a point cloud using TSDF fusion from multiple depth images captured at different angles.
-        Uses Open3D's integration pipeline to combine the depth images into a single point cloud.
+        Generates a point cloud using TSDF fusion from multiple depth images.
+        Controls a servo and LEDs via an Arduino over a serial connection.
         """
+        # MODIFIED: Initialize serial connection variable
+        ser = None
+        pipeline = rs.pipeline()  # Define pipeline here to access it in finally block
         try:
-            # Initialize servo controller using basic gpiozero (software PWM)
-            servo = None
-            servo_enabled = False
+            # --- NEW: Establish Serial Connection with Arduino ---
+            ARDUINO_PORT = '/dev/ttyACM0'  # <--- IMPORTANT: Check your port name!
+            BAUD_RATE = 9600
             try:
-                from gpiozero import Servo
-
-                servo = Servo(
-                    18,
-                    min_pulse_width=500/1000000,
-                    max_pulse_width=2500/1000000
-                )
-                servo.value = 0.0  # Start at center
-                time.sleep(0.5)
-                servo_enabled = True
-            except Exception:
-                servo = None
-                servo_enabled = False
-
-            # Helper to map angle (0–270°) to servo.value (-1.0 to +1.0)
-            def angle_to_servo_value(angle_deg, max_angle=270):
-                return (angle_deg / max_angle) * 2.0 - 1.0
-
+                ser = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+                time.sleep(2)  # Wait for Arduino to reset and establish connection
+                print(f"Successfully connected to Arduino on {ARDUINO_PORT}")
+            except serial.SerialException as e:
+                # Use QMessageBox for GUI-based error reporting
+                QMessageBox.warning(self, "Arduino Warning", f"Could not connect to Arduino on {ARDUINO_PORT}.\nRunning without servo/LED control.\nError: {e}")
+                ser = None # Ensure ser is None if connection fails
+            # --- NEW: Helper function to send commands ---
+            def send_command(command_string):
+                if ser and ser.is_open:
+                    print(f"Sending to Arduino: '{command_string}'")
+                    ser.write(command_string.encode('utf-8'))
+                    time.sleep(0.05) # Small delay for command processing
             # Initialize RealSense pipeline
-            pipeline = rs.pipeline()
             config = rs.config()
             config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
             config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
             profile = pipeline.start(config)
-
             # Get camera intrinsics
             depth_stream = profile.get_stream(rs.stream.depth)
             intr = depth_stream.as_video_stream_profile().get_intrinsics()
             intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                width=intr.width,
-                height=intr.height,
-                fx=intr.fx,
-                fy=intr.fy,
-                cx=intr.ppx,
-                cy=intr.ppy
+                width=intr.width, height=intr.height, fx=intr.fx, fy=intr.fy, cx=intr.ppx, cy=intr.ppy
             )
-
-            # Precompute rotated intrinsic for 90° CCW rotation
+            # NOTE: Your rotated_intrinsic logic is kept as is
             try:
                 rotated_intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                    width=intr.height,
-                    height=intr.width,
-                    fx=intr.fy,
-                    fy=intr.fx,
-                    cx=intr.ppy,
-                    cy=float(intr.width) - float(intr.ppx) - 1.0
+                    width=intr.height, height=intr.width, fx=intr.fy, fy=intr.fx,
+                    cx=intr.ppy, cy=float(intr.width) - float(intr.ppx) - 1.0
                 )
             except Exception:
                 rotated_intrinsic = intrinsic
-
-            # TSDF Parameters
-            voxel_length = 0.01
-            sdf_trunc = 0.04
+            # TSDF volume setup
             volume = o3d.pipelines.integration.ScalableTSDFVolume(
-                voxel_length=voxel_length,
-                sdf_trunc=sdf_trunc,
+                voxel_length=0.01, sdf_trunc=0.04,
                 color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
             )
-
-            try:
-                angles = [80, 100, 120, 140, 160, 180, 200, 220]
-                for angle_deg in angles:
-                    if servo_enabled and servo is not None:
-                        try:
-                            servo.value = angle_to_servo_value(angle_deg)
-                        except Exception:
-                            pass
-
-                    time.sleep(.5)  # Allow servo to settle
-
-                    frames = pipeline.wait_for_frames()
-                    depth_frame = frames.get_depth_frame()
-                    color_frame = frames.get_color_frame()
-                    if not depth_frame or not color_frame:
-                        continue
-
-                    depth_np = np.array(depth_frame.get_data())
-                    color_np = np.array(color_frame.get_data())
-
-                    try:
-                        depth_np = cv2.rotate(depth_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    except Exception:
-                        pass
-                    try:
-                        color_np = cv2.rotate(color_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    except Exception:
-                        pass
-
-                    depth_image = o3d.geometry.Image(depth_np)
-                    color_image = o3d.geometry.Image(color_np)
-
-                    angle_rad = math.radians(angle_deg)
-                    c = math.cos(angle_rad)
-                    s = math.sin(angle_rad)
-                    rotation = np.array([
-                        [1.0, 0.0, 0.0],
-                        [0.0,  c, -s],
-                        [0.0,  s,  c]
-                    ], dtype=float)
-
-                    extrinsic = np.eye(4, dtype=float)
-                    extrinsic[:3, :3] = rotation
-                    extrinsic[:3, 3] = np.array([0.0, 0.0, 0.05], dtype=float)
-
-                    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                        color_image,
-                        depth_image,
-                        depth_scale=1000.0,
-                        depth_trunc=5.0,
-                        convert_rgb_to_intensity=False
-                    )
-
-                    try:
-                        volume.integrate(rgbd, rotated_intrinsic, extrinsic)
-                    except Exception:
-                        volume.integrate(rgbd, intrinsic, extrinsic)
-
-                if servo_enabled and servo is not None:
-                    try:
-                        servo.close()
-                    except Exception:
-                        pass
-
-                mesh = volume.extract_triangle_mesh()
-                pcd = mesh.sample_points_uniformly(number_of_points=100000)
-
-                timestamp = time.strftime("%Y%m%d-%H%M%S")
-                save_path = os.path.join(self.settings.get('default_save_dir', os.path.expanduser('~')), f'tsdf_fusion_{timestamp}.ply')
-                o3d.io.write_point_cloud(save_path, pcd)
-
-                if save_path not in self.loaded_files['ply']:
-                    self.loaded_files['ply'].append(save_path)
-                QMessageBox.information(self, "Success", f"Point cloud saved to: {save_path}")
-
-            finally:
-                pipeline.stop()
-
+            # --- SCANNING SEQUENCE ---
+            # NEW: 1. Send command for all-white lights
+            send_command("L1") # Assuming 'L1' is your code for white LEDs
+            angles = [80, 100, 120, 140, 160, 180, 200, 220]
+            for angle_deg in angles:
+                # MODIFIED: 2. Send servo command to Arduino
+                send_command(f"S{angle_deg}")
+                # 3. Wait for servo to move to the new position
+                time.sleep(0.75) # Adjust this delay based on your servo's speed
+                # 4. Capture and process the frame
+                frames = pipeline.wait_for_frames()
+                depth_frame = frames.get_depth_frame()
+                color_frame = frames.get_color_frame()
+                if not depth_frame or not color_frame:
+                    continue
+                depth_np = np.array(depth_frame.get_data())
+                color_np = np.array(color_frame.get_data())
+                # Your image rotation logic is kept as is
+                try:
+                    depth_np = cv2.rotate(depth_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                    color_np = cv2.rotate(color_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
+                except Exception:
+                    pass
+                depth_image = o3d.geometry.Image(depth_np)
+                color_image = o3d.geometry.Image(color_np)
+                # Your extrinsic matrix calculation is kept as is
+                offset = np.array([0.0, 0.0, 0.05])
+                angle_rad = math.radians(angle_deg)
+                c, s = math.cos(angle_rad), math.sin(angle_rad)
+                R = np.array([[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]], dtype=float)
+                T_neg_offset = np.eye(4); T_neg_offset[:3, 3] = -offset
+                T_rotation = np.eye(4); T_rotation[:3, :3] = R
+                T_pos_offset = np.eye(4); T_pos_offset[:3, 3] = offset
+                extrinsic = T_pos_offset @ T_rotation @ T_neg_offset
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    color_image, depth_image, depth_scale=1000.0,
+                    depth_trunc=5.0, convert_rgb_to_intensity=False
+                )
+                try:
+                    volume.integrate(rgbd, rotated_intrinsic, extrinsic)
+                except Exception:
+                    volume.integrate(rgbd, intrinsic, extrinsic)
+            # --- POST-SCAN ACTIONS ---
+            # NEW: 5. Send command for rainbow lights and reset servo
+            send_command("L2") # Assuming 'L2' is your code for rainbow mode
+            send_command(f"S{angles[0]}") # Reset servo to the starting angle
+            # Extract and save the final point cloud
+            mesh = volume.extract_triangle_mesh()
+            pcd = mesh.sample_points_uniformly(number_of_points=200000)
+            
+            timestamp = time.strftime("%Y%m%d-%H%M%S")
+            save_dir = self.settings.get('default_save_dir', os.path.expanduser('~'))
+            save_path = os.path.join(save_dir, f'tsdf_fusion_{timestamp}.ply')
+            o3d.io.write_point_cloud(save_path, pcd)
+            if save_path not in self.loaded_files['ply']:
+                self.loaded_files['ply'].append(save_path)
+            QMessageBox.information(self, "Success", f"Point cloud saved to: {save_path}")
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to generate point cloud: {str(e)}")
+        finally:
+            # --- CLEANUP ---
+            pipeline.stop()
+            # MODIFIED: Ensure serial port is closed properly
+            if ser and ser.is_open:
+                ser.close()
+                print("Arduino serial connection closed.")
+
 
         
 class CaptureDialog(QDialog):
