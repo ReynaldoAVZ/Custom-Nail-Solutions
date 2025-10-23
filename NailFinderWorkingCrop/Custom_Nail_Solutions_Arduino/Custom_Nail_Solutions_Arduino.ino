@@ -1,106 +1,118 @@
 #include <FastLED.h>
 #include <Servo.h>
 
-// --- Configuration from your working script ---
+// --- Configuration ---
 // LED setup
-#define LED_PIN     6
-#define NUM_LEDS    100
+#define LED_PIN 6
+#define NUM_LEDS 100
 CRGB leds[NUM_LEDS];
 
 // Servo setup
-#define SERVO_PIN   9
+#define SERVO_PIN 9
 Servo myServo;
+
+// --- State Variables (NEW) ---
+// 1: White (Static), 2: Rainbow (Continuous)
+int currentPattern = 2; // Default to continuous Rainbow
+uint8_t gHue = 0;        // Variable to track the current position in the rainbow
 
 // --- Setup Function (Combined) ---
 void setup() {
-  // Start Serial communication (from command-listener script)
-  // This is required to talk to the Raspberry Pi
+  // Start Serial communication
   Serial.begin(9600);
 
-  // Initialize LED strip (from your script)
+  // Initialize LED strip
   FastLED.addLeds<WS2812, LED_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(255); // Set max brightness
 
-  // Initialize Servo (from your script)
+  // Initialize Servo
   myServo.attach(SERVO_PIN);
 
-  // --- Set a safe starting state ---
+  // --- Set a safe starting state ---
   myServo.write(80); // Start at the first angle your Python script uses
-  fill_solid(leds, NUM_LEDS, CRGB::Black); // Start with LEDs off
-  FastLED.show();
-
-  // Send a confirmation message to the Pi's serial monitor for debugging
   Serial.println("Arduino is ready for commands.");
+
+  // Initialize LEDs to black, the first call to loop() will start the rainbow
+  fill_solid(leds, NUM_LEDS, CRGB::Black); 
+  FastLED.show();
 }
 
-// --- Main Loop (from command-listener script) ---
-// This loop does nothing until a command arrives from the Raspberry Pi.
-// The automatic servo sweep has been removed.
+// --- Main Loop (Refactored for Non-Blocking State Management) ---
 void loop() {
-  // Check if there is data available to read from the Pi
+  // --- 1. Check for Serial Commands (Highest Priority) ---
   if (Serial.available() > 0) {
-    // Read the first character to determine the command type ('S' for Servo, 'L' for LED)
+    // Read the first character to determine the command type ('S' for Servo, 'L' for LED)
     char command = Serial.read();
 
     if (command == 'S') {
-      // If the command is 'S', the next part is an integer for the angle
+      // If 'S', the next part is an integer for the angle
       int angle = Serial.parseInt();
       myServo.write(angle); // Move the servo to the specified angle
-    } 
+
+      // Clear any leftover characters in the buffer after reading the int
+      while (Serial.available()) { Serial.read(); }
+    }
     else if (command == 'L') {
-      // If the command is 'L', the next part is an integer for the pattern
+      // If 'L', the next part is an integer for the pattern
       int pattern = Serial.parseInt();
-      setLedPattern(pattern); // Call the new FastLED pattern function
+      setLedPattern(pattern); // Change the active LED pattern
+
+      // Clear any leftover characters in the buffer after reading the int
+      while (Serial.available()) { Serial.read(); }
     }
   }
-  // If there's no data, the loop does nothing, holding the last position.
+
+  // --- 2. Execute Current LED Pattern (Non-blocking default mode) ---
+  // If no command was received, the Arduino executes the current pattern.
+  if (currentPattern == 1) {
+    // Pattern 1: Static White. No action needed here, as it was set in setLedPattern.
+    // This ensures the LED state is held constant during the scan.
+  } 
+  else if (currentPattern == 2) {
+    // Pattern 2: Continuous Rainbow.
+    updateRainbow(); 
+  }
+ 
+  // A small delay is acceptable here to debounce the loop and prevent 
+  // the Arduino from running too hot, but FastLED often handles timing internally.
+  // delay(1);
 }
 
-// --- Helper Function for LED Patterns (MODIFIED) ---
-// This function now uses FastLED commands instead of digitalWrite.
+// --- Helper Function for LED Patterns (MODIFIED to set state) ---
 void setLedPattern(int pattern) {
+  currentPattern = pattern; // Set the new state/pattern
+
   switch (pattern) {
     case 0: // Pattern 0: All LEDs Off
       fill_solid(leds, NUM_LEDS, CRGB::Black);
       FastLED.show();
       break;
-    case 1: // Pattern 1: All LEDs White
+    case 1: // Pattern 1: All LEDs White (used during scanning)
       fill_solid(leds, NUM_LEDS, CRGB::White);
       FastLED.show();
       break;
-    case 2: // Pattern 2: Rainbow Mode
-      // This will run a rainbow animation. Note that this is a "blocking"
-      // function, meaning the Arduino will be busy until the rainbow is done.
-      // This is perfect for a cool effect after the scan is complete.
-      rainbowCycle(20); 
+    case 2: 
+      // Pattern 2: Rainbow Mode. We don't run the animation here, 
+      // we simply switch the state. The main loop will handle the animation.
       break;
     default:
-      // Unknown pattern, do nothing
+      // If an unknown pattern is requested, default back to the continuous rainbow
+      currentPattern = 2;
       break;
   }
 }
 
-// --- Helper functions for the Rainbow Effect ---
-void rainbowCycle(uint8_t wait) {
-  uint16_t i, j;
-  for(j=0; j<256; j++) { // 1 cycle of all colors on the wheel
-    for(i=0; i<NUM_LEDS; i++) {
-      leds[i] = Wheel(((i * 256 / NUM_LEDS) + j) & 255);
-    }
-    FastLED.show();
-    delay(wait);
+// --- Non-Blocking Rainbow Effect (NEW) ---
+// This function must be called continuously in the main loop() 
+// but is non-blocking (it doesn't use delay()).
+void updateRainbow() {
+  // FastLED utility that runs the code inside every 20 milliseconds
+  EVERY_N_MILLISECONDS(20) {
+  gHue++; // Advance the color position
   }
-}
 
-uint32_t Wheel(byte WheelPos) {
-  WheelPos = 255 - WheelPos;
-  if(WheelPos < 85) {
-    return CRGB(255 - WheelPos * 3, 0, WheelPos * 3);
-  }
-  if(WheelPos < 170) {
-    WheelPos -= 85;
-    return CRGB(0, WheelPos * 3, 255 - WheelPos * 3);
-  }
-  WheelPos -= 170;
-  return CRGB(WheelPos * 3, 255 - WheelPos * 3, 0);
+  // Draw the rainbow effect based on the current hue.
+  // `fill_rainbow` is a much cleaner way to draw this effect than the old Wheel function.
+  fill_rainbow(leds, NUM_LEDS, gHue, 7); // Start color, total LEDs, hue, delta hue
+  FastLED.show();
 }
