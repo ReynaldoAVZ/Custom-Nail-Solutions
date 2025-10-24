@@ -1242,6 +1242,13 @@ class MainWindow(QMainWindow):
     def run_neural_network(self):
         QMessageBox.information(self, "Run Neural Network", "This feature is not yet implemented.")
 
+    def log(self, message):
+        """
+        Simple logging function to print messages to the console.
+        If your application has a GUI log/status bar, you would update it here.
+        """
+        print(f"[{time.strftime('%H:%M:%S')}] LOG: {message}")
+
     def generate_point_cloud(self):
             """
             Generates a point cloud using TSDF fusion from multiple depth images.
@@ -1256,6 +1263,9 @@ class MainWindow(QMainWindow):
             # MODIFIED: Initialize serial connection variable
             ser = None
             pipeline = rs.pipeline()  # Define pipeline here to access it in finally block
+            
+            # --- NEW: Flag to track if the pipeline was successfully started ---
+            pipeline_started = False 
 
             # --- NEW: Generate a single timestamp for the entire scan session ---
             timestamp = time.strftime("%Y%m%d-%H%M%S")
@@ -1282,13 +1292,16 @@ class MainWindow(QMainWindow):
                     if ser and ser.is_open:
                         self.log(f"Sending to Arduino: '{command_string}'")
                         ser.write(command_string.encode('utf-8'))
-                        time.sleep(0.05) # Small delay for command processing
+                        time.sleep(0.5) # Small delay for command processing
 
                 # Initialize RealSense pipeline
                 config = rs.config()
                 config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
                 config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+                
+                # MODIFIED: Start the pipeline and set the flag
                 profile = pipeline.start(config)
+                pipeline_started = True # <--- Set flag on successful start
 
                 # Get camera intrinsics
                 depth_stream = profile.get_stream(rs.stream.depth)
@@ -1314,7 +1327,7 @@ class MainWindow(QMainWindow):
                 # --- SCANNING SEQUENCE ---
                 send_command("L1") # 1. Send command for all-white lights
 
-                angles = [80, 100, 120, 140, 160, 180, 200, 220]
+                angles = [60, 70, 80, 90, 100, 110, 120, 130]
                 for angle_deg in angles:
                     frame_idx += 1 # Increment frame counter
 
@@ -1410,12 +1423,14 @@ class MainWindow(QMainWindow):
 
             finally:
                 # --- CLEANUP ---
-                pipeline.stop()
+                # FIX: Only call pipeline.stop() if it was successfully started
+                if pipeline_started:
+                    pipeline.stop()
+                    
                 # MODIFIED: Ensure serial port is closed properly
                 if ser and ser.is_open:
                     ser.close()
                     self.log("Arduino serial connection closed.")
-                    
 class CaptureDialog(QDialog):
     """
     A dialog to get user input for the number of frames, delay, and filename
