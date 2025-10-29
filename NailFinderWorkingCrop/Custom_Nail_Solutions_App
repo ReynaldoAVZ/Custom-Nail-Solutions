@@ -1250,112 +1250,94 @@ class MainWindow(QMainWindow):
         print(f"[{time.strftime('%H:%M:%S')}] LOG: {message}")
 
     def generate_point_cloud(self):
-<<<<<<< HEAD
-            """
-            Generates a point cloud using TSDF fusion from multiple depth images.
-            Controls a servo and LEDs via an Arduino over a serial connection.
-
-            FIXES:
-            1. Corrected Extrinsic Rotation: Uses Z-axis rotation (Rz) to model a 
-               horizontal sweeping motion, fixing the upward curvature issue.
-            2. Individual Frame Saving: Saves each captured frame's point cloud 
-               with an angle and frame index in the filename.
-            """
-            # MODIFIED: Initialize serial connection variable
-            ser = None
-            pipeline = rs.pipeline()  # Define pipeline here to access it in finally block
-            
-            # --- NEW: Flag to track if the pipeline was successfully started ---
-            pipeline_started = False 
-
-            # --- NEW: Generate a single timestamp for the entire scan session ---
-            timestamp = time.strftime("%Y%m%d-%H%M%S")
-            save_dir = self.settings.get('default_save_dir', os.path.expanduser('~'))
-
-            # --- NEW: Frame index counter ---
-            frame_idx = 0
-
-=======
         """
-        Generates and saves raw, unaligned point clouds, color images, and depth maps 
-        for each frame, ready for sophisticated post-processing registration.
+        Generates a point cloud using TSDF fusion from multiple depth images,
+        simulating control of a servo and LEDs via an Arduino.
         """
-        # NOTE: Assuming all necessary imports (rs, serial, time, o3d, np, cv2) are available in the class environment.
-        
+        # --- Arduino Connection Variables (Moved from Global Config) ---
+        ARDUINO_PORT = '/dev/ttyACM0' 
+        BAUD_RATE = 9600
+        INITIAL_SERVO_ANGLE = 90
+        # Angles to sweep through (adjust based on your setup)
+        SCAN_ANGLES = [60, 70, 80, 90, 100, 110, 120, 130] 
+        STREAM_WIDTH = 640
+        STREAM_HEIGHT = 480
+        STREAM_FPS = 30
         ser = None
-        pipeline = rs.pipeline() 
+        pipeline = rs.pipeline()
+        pipeline_started = False
         
-        # --- NEW: Generate a single timestamp for the entire scan session ---
+        # --- File and Path Setup ---
         timestamp = time.strftime("%Y%m%d-%H%M%S")
         save_dir = self.settings.get('default_save_dir', os.path.expanduser('~'))
-        
         frame_idx = 0
         
-        # --- RealSense Filters and Alignment ---
+        # --- Helper function for Serial Communication ---
+        def send_command(command_string):
+            """Sends a command string to the Arduino via the serial port."""
+            if ser and ser.is_open:
+                self.log(f"Sending to Arduino: '{command_string}'")
+                # ser.write(command_string.encode('utf-8')) # Actual write command (commented for safety)
+                time.sleep(0.05)
+            
         try:
-            spatial = rs.spatial_filter()
-            temporal = rs.temporal_filter()
-            hole_filling = rs.hole_filling_filter()
-            align = rs.align(rs.stream.color) 
-        except NameError:
-            self.log("pyrealsense2 is not fully imported or available. Cannot use filters.")
-            class DummyFilter:
-                def process(self, frame): return frame
-            spatial = temporal = hole_filling = DummyFilter()
-            class DummyAlign:
-                def process(self, frames): return frames
-            align = DummyAlign()
-    
-        try:
-            # --- Establish Serial Connection with Arduino ---
-            ARDUINO_PORT = '/dev/ttyACM0' 
-            BAUD_RATE = 9600
->>>>>>> f86989e8617013996b0b7a2edb2ac9e7e71557c2
+            # 1. --- Arduino Setup ---
             try:
                 # Mocking serial setup since we cannot actually connect
+                # Note: ARDUINO_PORT and BAUD_RATE are now defined inside this function scope.
                 ser = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
                 time.sleep(2) 
                 self.log(f"Successfully connected to Arduino on {ARDUINO_PORT}")
             except serial.SerialException as e:
-                QMessageBox.warning(self, "Arduino Warning", f"Could not connect to Arduino on {ARDUINO_PORT}.\nRunning without servo/LED control.\nError: {e}")
+                QMessageBox.warning(self.self, "Arduino Warning", f"Could not connect to Arduino on {ARDUINO_PORT}.\nRunning without servo/LED control.\nError: {e}")
                 ser = None
                 
-            def send_command(command_string):
-                if ser and ser.is_open:
-                    self.log(f"Sending to Arduino: '{command_string}'")
-                    # ser.write(command_string.encode('utf-8')) # Actual write command (commented for safety)
-                    time.sleep(0.05)
-                
-            # Initialize RealSense pipeline
+            # 2. --- RealSense Initialization and Intrinsics Retrieval ---
             config = rs.config()
-            config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-            profile = pipeline.start(config)
+            config.enable_stream(rs.stream.depth, STREAM_WIDTH, STREAM_HEIGHT, rs.format.z16, STREAM_FPS)
+            config.enable_stream(rs.stream.color, STREAM_WIDTH, STREAM_HEIGHT, rs.format.bgr8, STREAM_FPS)
             
-            # --- ACTUAL: Get camera intrinsics from the depth stream profile ---
+            # Start the pipeline and set the flag
+            profile = pipeline.start(config)
+            pipeline_started = True 
+
+            # Initialize RealSense Filters and Alignment (must be done after rs import)
+            spatial = rs.spatial_filter()
+            temporal = rs.temporal_filter()
+            hole_filling = rs.hole_filling_filter()
+            align = rs.align(rs.stream.color) 
+
+            # Get camera intrinsics
             depth_profile = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
             intr = depth_profile.get_intrinsics()
             self.log(f"Camera Intrinsics Found: {intr.width}x{intr.height} | fx:{intr.fx}, fy:{intr.fy}")
             
-            # Create the intrinsic object for Open3D (NO ROTATION LOGIC)
+            # Create the standard intrinsic object for Open3D
             intrinsic = o3d.camera.PinholeCameraIntrinsic(
                 width=intr.width, height=intr.height, fx=intr.fx, fy=intr.fy, cx=intr.ppx, cy=intr.ppy
             )
-            # Using intrinsic directly, so we no longer need 'rotated_intrinsic'
-    
-            # --- SCANNING SEQUENCE ---
-            send_command("L1") 
             
-            angles = [60, 70, 80, 90, 100, 110, 120]
+            # Use the standard intrinsic object directly (no rotation applied)
+            intrinsic_to_use = intrinsic
             
-            for angle_deg in angles:
+            # 3. --- TSDF Volume Setup ---
+            volume = o3d.pipelines.integration.ScalableTSDFVolume(
+                voxel_length=0.005, # Smaller voxel length for higher detail
+                sdf_trunc=0.02,     # Smaller truncation distance
+                color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
+            )
+            self.log("TSDF Volume initialized.")
+
+            # 4. --- SCANNING SEQUENCE ---
+            send_command("L1") # Turn on white lights
+            
+            for angle_deg in SCAN_ANGLES:
                 frame_idx += 1 
                 
-                send_command(f"S{angle_deg}")
+                send_command(f"S{angle_deg}") # Send servo command
+                time.sleep(1.0) # Wait for servo to move and SETTLE
                 
-                time.sleep(0.3) # Wait for servo to move and SETTLE
-                
-                # 4. Capture and process the frame
+                # Capture and align the frame set
                 frames = pipeline.wait_for_frames() # ACTUAL HARDWARE CAPTURE
                 aligned_frames = align.process(frames)
                 
@@ -1363,230 +1345,111 @@ class MainWindow(QMainWindow):
                 color_frame = aligned_frames.get_color_frame()
                 
                 if not depth_frame or not color_frame:
-                    self.log("Skipping frame: Depth or Color frame missing after alignment.")
+                    self.log(f"Skipping frame {frame_idx}: Depth or Color frame missing after alignment.")
                     continue
                     
-                # Apply Filters (Spatial, Temporal, Hole Filling)
+                # Apply Filters
                 depth_frame = spatial.process(depth_frame)
                 depth_frame = temporal.process(depth_frame)
                 depth_frame = hole_filling.process(depth_frame) 
 
-<<<<<<< HEAD
-                # --- Helper function to send commands ---
-                def send_command(command_string):
-                    if ser and ser.is_open:
-                        self.log(f"Sending to Arduino: '{command_string}'")
-                        ser.write(command_string.encode('utf-8'))
-                        time.sleep(0.5) # Small delay for command processing
-
-                # Initialize RealSense pipeline
-                config = rs.config()
-                config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
-                config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
-                
-                # MODIFIED: Start the pipeline and set the flag
-                profile = pipeline.start(config)
-                pipeline_started = True # <--- Set flag on successful start
-
-                # Get camera intrinsics
-                depth_stream = profile.get_stream(rs.stream.depth)
-                intr = depth_stream.as_video_stream_profile().get_intrinsics()
-                intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                    width=intr.width, height=intr.height, fx=intr.fx, fy=intr.fy, cx=intr.ppx, cy=intr.ppy
-                )
-                # NOTE: Your rotated_intrinsic logic is kept as is
-                try:
-                    rotated_intrinsic = o3d.camera.PinholeCameraIntrinsic(
-                        width=intr.height, height=intr.width, fx=intr.fy, fy=intr.fx,
-                        cx=intr.ppy, cy=float(intr.width) - float(intr.ppx) - 1.0
-                    )
-                except Exception:
-                    rotated_intrinsic = intrinsic
-
-                # TSDF volume setup
-                volume = o3d.pipelines.integration.ScalableTSDFVolume(
-                    voxel_length=0.01, sdf_trunc=0.04,
-                    color_type=o3d.pipelines.integration.TSDFVolumeColorType.RGB8
-                )
-
-                # --- SCANNING SEQUENCE ---
-                send_command("L1") # 1. Send command for all-white lights
-
-                angles = [60, 70, 80, 90, 100, 110, 120, 130]
-                for angle_deg in angles:
-                    frame_idx += 1 # Increment frame counter
-
-                    # 2. Send servo command to Arduino
-                    send_command(f"S{angle_deg}")
-
-                    # 3. Wait for servo to move to the new position
-                    time.sleep(0.75) # Adjust this delay based on your servo's speed
-
-                    # 4. Capture and process the frame
-                    frames = pipeline.wait_for_frames()
-                    depth_frame = frames.get_depth_frame()
-                    color_frame = frames.get_color_frame()
-
-                    if not depth_frame or not color_frame:
-                        continue
-
-                    depth_np = np.array(depth_frame.get_data())
-                    color_np = np.array(color_frame.get_data())
-
-                    # Your image rotation logic is kept as is
-                    try:
-                        depth_np = cv2.rotate(depth_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                        color_np = cv2.rotate(color_np, cv2.ROTATE_90_COUNTERCLOCKWISE)
-                    except Exception:
-                        pass
-
-                    depth_image = o3d.geometry.Image(depth_np)
-                    color_image = o3d.geometry.Image(color_np)
-
-                    # --- MODIFIED: Extrinsic Matrix Calculation (Rotation Fix) ---
-                    offset = np.array([0.0, 0.0, 0.05])
-                    angle_rad = math.radians(angle_deg)
-                    c, s = math.cos(angle_rad), math.sin(angle_rad)
-
-                    # FIX: Changing rotation axis from X to Z for a sweeping motion 
-                    # over a flat surface (horizontal arc).
-                    R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
-
-                    T_neg_offset = np.eye(4); T_neg_offset[:3, 3] = -offset
-                    T_rotation = np.eye(4); T_rotation[:3, :3] = R
-                    T_pos_offset = np.eye(4); T_pos_offset[:3, 3] = offset
-                    extrinsic = T_pos_offset @ T_rotation @ T_neg_offset
-
-                    rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
-                        color_image, depth_image, depth_scale=1000.0,
-                        depth_trunc=5.0, convert_rgb_to_intensity=False
-                    )
-
-                    # Use intrinsic that matches the expected rotation
-                    intrinsic_to_use = rotated_intrinsic 
-                    try:
-                        # Integrate into TSDF volume
-                        volume.integrate(rgbd, rotated_intrinsic, extrinsic)
-                    except Exception:
-                        # Fallback to default intrinsic if the rotated one fails
-                        intrinsic_to_use = intrinsic
-                        volume.integrate(rgbd, intrinsic, extrinsic)
-
-                    # --- NEW: Save Individual Point Cloud for Analysis ---
-                    pcd_frame = o3d.geometry.PointCloud.create_from_rgbd_image(
-                        rgbd, intrinsic_to_use
-                    )
-
-                    # Apply the camera's pose transformation
-                    pcd_frame.transform(extrinsic)
-
-                    # Save the individual point cloud with frame info
-                    individual_save_path = os.path.join(
-                        save_dir, f'frame_{frame_idx:02d}_angle_{angle_deg}deg_{timestamp}.ply'
-                    )
-                    o3d.io.write_point_cloud(individual_save_path, pcd_frame)
-                    self.log(f"Saved individual frame: {individual_save_path}")
-
-                # --- POST-SCAN ACTIONS ---
-                send_command("L2") # 5. Send command for rainbow mode
-                send_command(f"S{angles[0]}") # Reset servo to the starting angle
-
-                # Extract and save the final combined point cloud
-                mesh = volume.extract_triangle_mesh()
-                pcd = mesh.sample_points_uniformly(number_of_points=200000)
-
-                final_save_path = os.path.join(save_dir, f'tsdf_fusion_FINAL_{timestamp}.ply')
-                o3d.io.write_point_cloud(final_save_path, pcd)
-
-                if final_save_path not in self.loaded_files['ply']:
-                    self.loaded_files['ply'].append(final_save_path)
-
-                QMessageBox.information(self, "Success", f"Scan complete. Final point cloud saved to: {final_save_path}\n({frame_idx} individual frames also saved.)")
-
-            except Exception as e:
-                QMessageBox.critical(self, "Error", f"Failed to generate point cloud: {str(e)}")
-
-            finally:
-                # --- CLEANUP ---
-                # FIX: Only call pipeline.stop() if it was successfully started
-                if pipeline_started:
-                    pipeline.stop()
-                    
-                # MODIFIED: Ensure serial port is closed properly
-                if ser and ser.is_open:
-                    ser.close()
-                    self.log("Arduino serial connection closed.")
-=======
                 # Convert frames to numpy arrays
                 depth_np = np.asanyarray(depth_frame.get_data())
                 color_np = np.asanyarray(color_frame.get_data())
-                    
-                # --- NEW: Save Raw Images and Depth Maps ---
-                # Construct base filename
-                base_filename = f'raw_{frame_idx:02d}_angle_{angle_deg}deg_{timestamp}'
                 
-                # 1. Save Color Image (BGR format from RealSense)
-                color_save_path = os.path.join(save_dir, f'color_{base_filename}.png')
+                # Image data is captured and used directly without rotation, matching the standard intrinsics.
+                
+                # --- NEW: Save Individual Raw Color and Depth Images and Point Cloud ---
+                base_filename = f'frame_{frame_idx:02d}_angle_{angle_deg}deg_{timestamp}'
+                
+                # 4a. Save Color Image (as standard PNG)
+                color_save_path = os.path.join(save_dir, f'{base_filename}_color.png')
                 cv2.imwrite(color_save_path, color_np)
-                self.log(f"Saved RAW color image: {color_save_path}")
+                self.log(f"Saved individual color image: {color_save_path}")
 
-                # 2. Save Depth Image (16-bit grayscale)
-                depth_save_path = os.path.join(save_dir, f'depth_{base_filename}.png')
-                # cv2.imwrite correctly saves uint16 arrays as 16-bit grayscale PNG
+                # 4b. Save Depth Image (as 16-bit grayscale PNG to preserve depth values)
+                depth_save_path = os.path.join(save_dir, f'{base_filename}_depth.png')
+                # cv2.imwrite correctly saves 16-bit numpy arrays (like depth_np) to a 16-bit PNG
                 cv2.imwrite(depth_save_path, depth_np) 
-                self.log(f"Saved RAW depth map: {depth_save_path}")
-                # --- END NEW SAVING LOGIC ---
-                # 3. Generate and Save Raw Point Cloud
+                self.log(f"Saved individual depth map: {depth_save_path}")
+
+                # Convert numpy arrays to Open3D images for TSDF integration and PLY generation
                 depth_image = o3d.geometry.Image(depth_np)
                 color_image = o3d.geometry.Image(color_np)
                 
-                # --- Extrinsic Matrix: USE IDENTITY MATRIX ---
-                # This ensures the point cloud is generated in the camera's local coordinate frame (RAW).
-                extrinsic_identity = np.eye(4)
+                # --- Extrinsic Matrix Calculation (Rz Rotation) ---
+                # Define the center of rotation (e.g., 5cm in front of the camera)
+                offset = np.array([0.0, 0.0, 0.05])
+                angle_rad = math.radians(angle_deg - INITIAL_SERVO_ANGLE) # Rotation relative to the initial angle
+                c, s = math.cos(angle_rad), math.sin(angle_rad)
+
+                # Rz Rotation Matrix: Rotates around the Z-axis (turntable rotation)
+                R = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]], dtype=float)
+
+                # Transformation Sequence: T_pos_offset * T_rotation * T_neg_offset
+                T_neg_offset = np.eye(4); T_neg_offset[:3, 3] = -offset
+                T_rotation = np.eye(4); T_rotation[:3, :3] = R
+                T_pos_offset = np.eye(4); T_pos_offset[:3, 3] = offset
+                extrinsic = T_pos_offset @ T_rotation @ T_neg_offset
                 
-                # Use the default intrinsic parameters
-                intrinsic_to_use = intrinsic
-                
-                # Create the RGBD image and Point Cloud
-                pcd_frame = o3d.geometry.PointCloud.create_from_rgbd_image(
-                    rgbd_image=o3d.geometry.RGBDImage.create_from_color_and_depth(
-                        color_image, depth_image, depth_scale=1000.0,
-                        depth_trunc=5.0, convert_rgb_to_intensity=False
-                    ), 
-                    intrinsic=intrinsic_to_use
+                # Create the RGBD image
+                rgbd = o3d.geometry.RGBDImage.create_from_color_and_depth(
+                    color_image, depth_image, depth_scale=1000.0,
+                    depth_trunc=5.0, convert_rgb_to_intensity=False
                 )
+
+                # Integrate into TSDF volume
+                volume.integrate(rgbd, intrinsic_to_use, extrinsic)
+                self.log(f"Integrated frame {frame_idx} (Angle: {angle_deg} deg) into TSDF.")
+
+                # 4c. Save Individual Point Cloud
+                pcd_frame = o3d.geometry.PointCloud.create_from_rgbd_image(
+                    rgbd, intrinsic_to_use
+                )
+                pcd_frame.transform(extrinsic) # Apply the transformation
                 
-                # Apply the camera's pose transformation (Identity, which does nothing to the coordinates)
-                pcd_frame.transform(extrinsic_identity)
-    
-                # Save the individual raw point cloud with frame info
                 individual_save_path = os.path.join(
-                    save_dir, f'pcd_{base_filename}.ply'
+                    save_dir, f'{base_filename}_pcd.ply' # Changed suffix to pcd.ply for clarity
                 )
                 o3d.io.write_point_cloud(individual_save_path, pcd_frame)
-                self.log(f"Saved RAW point cloud: {individual_save_path}")
-                
-            # --- POST-SCAN ACTIONS ---
-            send_command("L2") 
-            send_command(f"S{angles[0]}") 
+                self.log(f"Saved individual point cloud: {individual_save_path}")
+
+            # 5. --- POST-SCAN ACTIONS ---
+            send_command("L2") # Send command for rainbow mode
+            send_command(f"S{INITIAL_SERVO_ANGLE}") # Reset servo to the initial angle
+
+            # Extract and save the final combined point cloud
+            mesh = volume.extract_triangle_mesh()
             
-            # REMOVED: No TSDF fusion or final mesh saving is performed.
-            
-            QMessageBox.information(self, "Success", f"Scan complete. {frame_idx} sets of RAW images, depth maps, and point clouds saved, ready for external registration.")
-            
+            # Optional: Refine the mesh
+            mesh.remove_degenerate_triangles()
+            mesh.remove_unreferenced_vertices()
+            mesh.compute_vertex_normals()
+
+            # Convert mesh back to point cloud for PLY save
+            pcd = mesh.sample_points_uniformly(number_of_points=200000)
+
+            final_save_path = os.path.join(save_dir, f'tsdf_fusion_FINAL_{timestamp}.ply')
+            o3d.io.write_point_cloud(final_save_path, pcd)
+
+            if final_save_path not in self.loaded_files['ply']:
+                self.loaded_files['ply'].append(final_save_path)
+
+            # Updated success message
+            QMessageBox.information(self.self, "Success", f"Scan complete! Final point cloud saved to: {final_save_path}\n({frame_idx} sets of Color, Depth, and PLY files were saved.)")
+
         except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to capture raw frames: {str(e)}")
+            QMessageBox.critical(self.self, "Error", f"Failed to generate point cloud: {str(e)}")
             
         finally:
-            # --- CLEANUP ---
-            if 'pipeline' in locals() and pipeline is not None:
+            # 6. --- CLEANUP ---
+            if pipeline_started:
                 # pipeline.stop() # Uncomment for actual RealSense environment
                 pass
             if ser and ser.is_open:
                 ser.close()
                 self.log("Arduino serial connection closed.")
-                    
->>>>>>> f86989e8617013996b0b7a2edb2ac9e7e71557c2
+                
 class CaptureDialog(QDialog):
     """
     A dialog to get user input for the number of frames, delay, and filename
