@@ -1250,6 +1250,7 @@ class MainWindow(QMainWindow):
         print(f"[{time.strftime('%H:%M:%S')}] LOG: {message}")
 
     def generate_point_cloud(self):
+<<<<<<< HEAD
             """
             Generates a point cloud using TSDF fusion from multiple depth images.
             Controls a servo and LEDs via an Arduino over a serial connection.
@@ -1274,19 +1275,103 @@ class MainWindow(QMainWindow):
             # --- NEW: Frame index counter ---
             frame_idx = 0
 
+=======
+        """
+        Generates and saves raw, unaligned point clouds, color images, and depth maps 
+        for each frame, ready for sophisticated post-processing registration.
+        """
+        # NOTE: Assuming all necessary imports (rs, serial, time, o3d, np, cv2) are available in the class environment.
+        
+        ser = None
+        pipeline = rs.pipeline() 
+        
+        # --- NEW: Generate a single timestamp for the entire scan session ---
+        timestamp = time.strftime("%Y%m%d-%H%M%S")
+        save_dir = self.settings.get('default_save_dir', os.path.expanduser('~'))
+        
+        frame_idx = 0
+        
+        # --- RealSense Filters and Alignment ---
+        try:
+            spatial = rs.spatial_filter()
+            temporal = rs.temporal_filter()
+            hole_filling = rs.hole_filling_filter()
+            align = rs.align(rs.stream.color) 
+        except NameError:
+            self.log("pyrealsense2 is not fully imported or available. Cannot use filters.")
+            class DummyFilter:
+                def process(self, frame): return frame
+            spatial = temporal = hole_filling = DummyFilter()
+            class DummyAlign:
+                def process(self, frames): return frames
+            align = DummyAlign()
+    
+        try:
+            # --- Establish Serial Connection with Arduino ---
+            ARDUINO_PORT = '/dev/ttyACM0' 
+            BAUD_RATE = 9600
+>>>>>>> f86989e8617013996b0b7a2edb2ac9e7e71557c2
             try:
-                # --- Establish Serial Connection with Arduino ---
-                ARDUINO_PORT = '/dev/ttyACM0'  # <--- IMPORTANT: Check your port name!
-                BAUD_RATE = 9600
-                try:
-                    ser = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
-                    time.sleep(2)  # Wait for Arduino to reset and establish connection
-                    self.log(f"Successfully connected to Arduino on {ARDUINO_PORT}")
-                except serial.SerialException as e:
-                    # Use QMessageBox for GUI-based error reporting
-                    QMessageBox.warning(self, "Arduino Warning", f"Could not connect to Arduino on {ARDUINO_PORT}.\nRunning without servo/LED control.\nError: {e}")
-                    ser = None # Ensure ser is None if connection fails
+                # Mocking serial setup since we cannot actually connect
+                ser = serial.Serial(ARDUINO_PORT, BAUD_RATE, timeout=1)
+                time.sleep(2) 
+                self.log(f"Successfully connected to Arduino on {ARDUINO_PORT}")
+            except serial.SerialException as e:
+                QMessageBox.warning(self, "Arduino Warning", f"Could not connect to Arduino on {ARDUINO_PORT}.\nRunning without servo/LED control.\nError: {e}")
+                ser = None
+                
+            def send_command(command_string):
+                if ser and ser.is_open:
+                    self.log(f"Sending to Arduino: '{command_string}'")
+                    # ser.write(command_string.encode('utf-8')) # Actual write command (commented for safety)
+                    time.sleep(0.05)
+                
+            # Initialize RealSense pipeline
+            config = rs.config()
+            config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+            config.enable_stream(rs.stream.color, 640, 480, rs.format.bgr8, 30)
+            profile = pipeline.start(config)
+            
+            # --- ACTUAL: Get camera intrinsics from the depth stream profile ---
+            depth_profile = rs.video_stream_profile(profile.get_stream(rs.stream.depth))
+            intr = depth_profile.get_intrinsics()
+            self.log(f"Camera Intrinsics Found: {intr.width}x{intr.height} | fx:{intr.fx}, fy:{intr.fy}")
+            
+            # Create the intrinsic object for Open3D (NO ROTATION LOGIC)
+            intrinsic = o3d.camera.PinholeCameraIntrinsic(
+                width=intr.width, height=intr.height, fx=intr.fx, fy=intr.fy, cx=intr.ppx, cy=intr.ppy
+            )
+            # Using intrinsic directly, so we no longer need 'rotated_intrinsic'
+    
+            # --- SCANNING SEQUENCE ---
+            send_command("L1") 
+            
+            angles = [60, 70, 80, 90, 100, 110, 120]
+            
+            for angle_deg in angles:
+                frame_idx += 1 
+                
+                send_command(f"S{angle_deg}")
+                
+                time.sleep(0.3) # Wait for servo to move and SETTLE
+                
+                # 4. Capture and process the frame
+                frames = pipeline.wait_for_frames() # ACTUAL HARDWARE CAPTURE
+                aligned_frames = align.process(frames)
+                
+                depth_frame = aligned_frames.get_depth_frame()
+                color_frame = aligned_frames.get_color_frame()
+                
+                if not depth_frame or not color_frame:
+                    self.log("Skipping frame: Depth or Color frame missing after alignment.")
+                    continue
+                    
+                # Apply Filters (Spatial, Temporal, Hole Filling)
+                depth_frame = spatial.process(depth_frame)
+                depth_frame = temporal.process(depth_frame)
+                depth_frame = hole_filling.process(depth_frame) 
 
+<<<<<<< HEAD
                 # --- Helper function to send commands ---
                 def send_command(command_string):
                     if ser and ser.is_open:
@@ -1431,6 +1516,77 @@ class MainWindow(QMainWindow):
                 if ser and ser.is_open:
                     ser.close()
                     self.log("Arduino serial connection closed.")
+=======
+                # Convert frames to numpy arrays
+                depth_np = np.asanyarray(depth_frame.get_data())
+                color_np = np.asanyarray(color_frame.get_data())
+                    
+                # --- NEW: Save Raw Images and Depth Maps ---
+                # Construct base filename
+                base_filename = f'raw_{frame_idx:02d}_angle_{angle_deg}deg_{timestamp}'
+                
+                # 1. Save Color Image (BGR format from RealSense)
+                color_save_path = os.path.join(save_dir, f'color_{base_filename}.png')
+                cv2.imwrite(color_save_path, color_np)
+                self.log(f"Saved RAW color image: {color_save_path}")
+
+                # 2. Save Depth Image (16-bit grayscale)
+                depth_save_path = os.path.join(save_dir, f'depth_{base_filename}.png')
+                # cv2.imwrite correctly saves uint16 arrays as 16-bit grayscale PNG
+                cv2.imwrite(depth_save_path, depth_np) 
+                self.log(f"Saved RAW depth map: {depth_save_path}")
+                # --- END NEW SAVING LOGIC ---
+                # 3. Generate and Save Raw Point Cloud
+                depth_image = o3d.geometry.Image(depth_np)
+                color_image = o3d.geometry.Image(color_np)
+                
+                # --- Extrinsic Matrix: USE IDENTITY MATRIX ---
+                # This ensures the point cloud is generated in the camera's local coordinate frame (RAW).
+                extrinsic_identity = np.eye(4)
+                
+                # Use the default intrinsic parameters
+                intrinsic_to_use = intrinsic
+                
+                # Create the RGBD image and Point Cloud
+                pcd_frame = o3d.geometry.PointCloud.create_from_rgbd_image(
+                    rgbd_image=o3d.geometry.RGBDImage.create_from_color_and_depth(
+                        color_image, depth_image, depth_scale=1000.0,
+                        depth_trunc=5.0, convert_rgb_to_intensity=False
+                    ), 
+                    intrinsic=intrinsic_to_use
+                )
+                
+                # Apply the camera's pose transformation (Identity, which does nothing to the coordinates)
+                pcd_frame.transform(extrinsic_identity)
+    
+                # Save the individual raw point cloud with frame info
+                individual_save_path = os.path.join(
+                    save_dir, f'pcd_{base_filename}.ply'
+                )
+                o3d.io.write_point_cloud(individual_save_path, pcd_frame)
+                self.log(f"Saved RAW point cloud: {individual_save_path}")
+                
+            # --- POST-SCAN ACTIONS ---
+            send_command("L2") 
+            send_command(f"S{angles[0]}") 
+            
+            # REMOVED: No TSDF fusion or final mesh saving is performed.
+            
+            QMessageBox.information(self, "Success", f"Scan complete. {frame_idx} sets of RAW images, depth maps, and point clouds saved, ready for external registration.")
+            
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to capture raw frames: {str(e)}")
+            
+        finally:
+            # --- CLEANUP ---
+            if 'pipeline' in locals() and pipeline is not None:
+                # pipeline.stop() # Uncomment for actual RealSense environment
+                pass
+            if ser and ser.is_open:
+                ser.close()
+                self.log("Arduino serial connection closed.")
+                    
+>>>>>>> f86989e8617013996b0b7a2edb2ac9e7e71557c2
 class CaptureDialog(QDialog):
     """
     A dialog to get user input for the number of frames, delay, and filename

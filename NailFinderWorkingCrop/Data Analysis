@@ -1,0 +1,165 @@
+import open3d as o3d
+import numpy as np
+import tkinter as tk
+from tkinter import filedialog
+import matplotlib.pyplot as plt
+
+# ------------------- File Selection -------------------
+def select_files():
+    root = tk.Tk()
+    root.withdraw()
+    file_paths = filedialog.askopenfilenames(
+        title="Select Point Cloud Files",
+        filetypes=[("Point Cloud Files","*.ply;*.stl;*.obj;*.pcd")]
+    )
+    root.destroy()
+    return list(file_paths)
+
+# ------------------- Point Cloud Analysis -------------------
+def scale_to_mm(pcd):
+    pcd.points = o3d.utility.Vector3dVector(np.asarray(pcd.points)*10)
+    return pcd
+
+def compute_basic_stats(pcd):
+    points = np.asarray(pcd.points)
+    dims = points.max(axis=0) - points.min(axis=0)
+    mean_xyz = points.mean(axis=0)
+    std_xyz = points.std(axis=0)
+    return {"dimensions": dims, "mean": mean_xyz, "std": std_xyz}
+
+def downsample_pcd(pcd, voxel_size=1.0):
+    return pcd.voxel_down_sample(voxel_size)
+
+def compute_rmse(original, downsampled):
+    tree = o3d.geometry.KDTreeFlann(original)
+    distances = []
+    for p in np.asarray(downsampled.points):
+        _, idx, _ = tree.search_knn_vector_3d(p, 1)
+        nearest = np.asarray(original.points)[idx[0]]
+        distances.append(np.linalg.norm(p - nearest))
+    distances = np.array(distances)
+    rmse = np.sqrt(np.mean(distances**2))
+    mae = np.mean(distances)
+    return rmse, mae
+
+# ------------------- Roughness & Curvature -------------------
+def compute_local_roughness(pcd, nb_neighbors=20):
+    points = np.asarray(pcd.points)
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+    roughness = []
+    for i, p in enumerate(points):
+        _, idx, _ = kdtree.search_knn_vector_3d(p, nb_neighbors)
+        neighbors = points[idx, :]
+        cov = np.cov(neighbors.T)
+        eigvals = np.linalg.eigvalsh(cov)
+        # Smallest eigenvalue is local deviation from plane
+        roughness.append(np.sqrt(eigvals[0]))
+    return np.array(roughness)
+
+def compute_local_curvature(pcd, nb_neighbors=20):
+    points = np.asarray(pcd.points)
+    kdtree = o3d.geometry.KDTreeFlann(pcd)
+    curvature = []
+    for i, p in enumerate(points):
+        _, idx, _ = kdtree.search_knn_vector_3d(p, nb_neighbors)
+        neighbors = points[idx, :]
+        cov = np.cov(neighbors.T)
+        eigvals = np.linalg.eigvalsh(cov)
+        curvature.append(eigvals[0] / eigvals.sum())
+    return np.array(curvature)
+
+# ------------------- ICP Fusion -------------------
+def fuse_point_clouds_icp(pcds):
+    fused = pcds[0]
+    fused.estimate_normals()
+    for i in range(1, len(pcds)):
+        source = pcds[i]
+        source.estimate_normals()
+        reg_p2p = o3d.pipelines.registration.registration_icp(
+            source, fused, max_correspondence_distance=2.0,
+            estimation_method=o3d.pipelines.registration.TransformationEstimationPointToPoint()
+        )
+        source.transform(reg_p2p.transformation)
+        fused += source
+    return fused
+
+# ------------------- Plotting -------------------
+def plot_dimensions(stats_list):
+    dims = np.array([s["dimensions"] for s in stats_list])
+    plt.figure()
+    plt.plot(dims[:,0],'o-',label='X')
+    plt.plot(dims[:,1],'s-',label='Y')
+    plt.plot(dims[:,2],'^-',label='Z')
+    plt.xlabel("File Index")
+    plt.ylabel("Dimension (mm)")
+    plt.title("Point Cloud Dimensions")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+def plot_histogram_rms(stats_list):
+    rms_values = [np.linalg.norm(s["std"]) for s in stats_list]
+    plt.figure()
+    plt.hist(rms_values, bins=10)
+    plt.xlabel("RMS deviation (mm)")
+    plt.ylabel("Frequency")
+    plt.title("Point Cloud RMS Deviation Histogram")
+    plt.show()
+
+def plot_roughness_curvature(roughness_list, curvature_list):
+    plt.figure(figsize=(12,5))
+    plt.subplot(1,2,1)
+    plt.hist(roughness_list, bins=30, color='skyblue')
+    plt.xlabel("Roughness (mm)")
+    plt.ylabel("Frequency")
+    plt.title("Local Surface Roughness Histogram")
+
+    plt.subplot(1,2,2)
+    plt.hist(curvature_list, bins=30, color='lightgreen')
+    plt.xlabel("Curvature")
+    plt.ylabel("Frequency")
+    plt.title("Local Curvature Histogram")
+    plt.show()
+
+def plot_3d_point_cloud(pcd, title="Point Cloud"):
+    o3d.visualization.draw_geometries([pcd], window_name=title)
+
+# ------------------- Main Script -------------------
+if __name__=="__main__":
+    file_paths = select_files()
+    if not file_paths:
+        print("No files selected.")
+        exit()
+    
+    print("Loading point clouds and scaling to mm...")
+    pcds = [scale_to_mm(o3d.io.read_point_cloud(f)) for f in file_paths]
+    
+    print("Computing basic stats...")
+    stats_list = [compute_basic_stats(pcd) for pcd in pcds]
+    for i, s in enumerate(stats_list):
+        print(f"File {i}: Dimensions={s['dimensions']}, Mean={s['mean']}, Std={s['std']}")
+    
+    print("Downsampling and computing RMSE/MAE...")
+    voxel_size = 0.5
+    downsampled_pcds = [downsample_pcd(pcd, voxel_size) for pcd in pcds]
+    rmse_list = [compute_rmse(orig, ds) for orig, ds in zip(pcds, downsampled_pcds)]
+    for i, (rmse, mae) in enumerate(rmse_list):
+        print(f"File {i}: RMSE={rmse:.4f} mm, MAE={mae:.4f} mm")
+
+    print("Computing roughness and curvature...")
+    roughness_list = [compute_local_roughness(pcd) for pcd in pcds]
+    curvature_list = [compute_local_curvature(pcd) for pcd in pcds]
+
+    for i, (rough, curv) in enumerate(zip(roughness_list, curvature_list)):
+        print(f"File {i}: Roughness mean={rough.mean():.4f} mm, Curvature mean={curv.mean():.6f}")
+
+    print("Plotting results...")
+    plot_dimensions(stats_list)
+    plot_histogram_rms(stats_list)
+    for rough, curv in zip(roughness_list, curvature_list):
+        plot_roughness_curvature(rough, curv)
+
+    print("Running ICP fusion...")
+    fused_pcd = fuse_point_clouds_icp(pcds)
+    print("Visualizing fused point cloud...")
+    plot_3d_point_cloud(fused_pcd, title="Fused Point Cloud")
