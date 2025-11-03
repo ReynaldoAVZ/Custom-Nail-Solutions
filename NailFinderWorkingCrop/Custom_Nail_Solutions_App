@@ -1259,7 +1259,7 @@ class MainWindow(QMainWindow):
         BAUD_RATE = 9600
         INITIAL_SERVO_ANGLE = 90
         # Angles to sweep through (adjust based on your setup)
-        SCAN_ANGLES = [60, 70, 80, 90, 100, 110, 120, 130] 
+        SCAN_ANGLES = [120, 40, 50, 60, 70, 80, 90, 100, 110, 120, 130]
         STREAM_WIDTH = 640
         STREAM_HEIGHT = 480
         STREAM_FPS = 30
@@ -1277,8 +1277,8 @@ class MainWindow(QMainWindow):
             """Sends a command string to the Arduino via the serial port."""
             if ser and ser.is_open:
                 self.log(f"Sending to Arduino: '{command_string}'")
-                # ser.write(command_string.encode('utf-8')) # Actual write command (commented for safety)
-                time.sleep(0.05)
+            ser.write(command_string.encode('utf-8')) # Actual write command (commented for safety)
+            time.sleep(1.0)
             
         try:
             # 1. --- Arduino Setup ---
@@ -1333,9 +1333,8 @@ class MainWindow(QMainWindow):
             
             for angle_deg in SCAN_ANGLES:
                 frame_idx += 1 
-                
                 send_command(f"S{angle_deg}") # Send servo command
-                time.sleep(1.0) # Wait for servo to move and SETTLE
+                time.sleep(2.0)#wait for servo to move and SETTLE
                 
                 # Capture and align the frame set
                 frames = pipeline.wait_for_frames() # ACTUAL HARDWARE CAPTURE
@@ -1414,9 +1413,10 @@ class MainWindow(QMainWindow):
                 o3d.io.write_point_cloud(individual_save_path, pcd_frame)
                 self.log(f"Saved individual point cloud: {individual_save_path}")
 
-            # 5. --- POST-SCAN ACTIONS ---
-            send_command("L2") # Send command for rainbow mode
+            # 5. --- POST-SCAN ACTIONS --- 
             send_command(f"S{INITIAL_SERVO_ANGLE}") # Reset servo to the initial angle
+            time.sleep(1.0) # Allow time for servo to reset     
+            send_command("L2") # Send command for rainbow mode
 
             # Extract and save the final combined point cloud
             mesh = volume.extract_triangle_mesh()
@@ -1436,15 +1436,15 @@ class MainWindow(QMainWindow):
                 self.loaded_files['ply'].append(final_save_path)
 
             # Updated success message
-            QMessageBox.information(self.self, "Success", f"Scan complete! Final point cloud saved to: {final_save_path}\n({frame_idx} sets of Color, Depth, and PLY files were saved.)")
+            QMessageBox.information(self, "Success", f"Scan complete! Final point cloud saved to: {final_save_path}\n({frame_idx} sets of Color, Depth, and PLY files were saved.)")
 
         except Exception as e:
-            QMessageBox.critical(self.self, "Error", f"Failed to generate point cloud: {str(e)}")
+            QMessageBox.critical(self, "Error", f"Failed to generate point cloud: {str(e)}")
             
         finally:
             # 6. --- CLEANUP ---
             if pipeline_started:
-                # pipeline.stop() # Uncomment for actual RealSense environment
+                pipeline.stop() # Uncomment for actual RealSense environment
                 pass
             if ser and ser.is_open:
                 ser.close()
