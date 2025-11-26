@@ -1,11 +1,11 @@
-from PyQt6.QtWidgets import (
+from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QLabel, QVBoxLayout, QHBoxLayout, QPushButton,
     QWidget, QDialog, QDialogButtonBox, QMessageBox, QFileDialog, QScrollArea,
     QLineEdit, QCheckBox, QSpinBox
 )
-from PyQt6.QtWidgets import QInputDialog
-from PyQt6.QtGui import (QPixmap, QImage, QPainter, QColor, QFont, QPalette)
-from PyQt6.QtCore import Qt, QThread, pyqtSignal
+from PyQt5.QtWidgets import QInputDialog
+from PyQt5.QtGui import (QPixmap, QImage, QPainter, QColor, QFont, QPalette)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from rpi_hardware_pwm import HardwarePWM
 import open3d as o3d
 import sys
@@ -17,11 +17,19 @@ import cv2
 import math
 import time
 import json
+<<<<<<< HEAD
 from PyQt6.QtWidgets import QSlider
 from PyQt6.QtWidgets import QColorDialog
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QMouseEvent
 import serial
+=======
+from PyQt5.QtWidgets import QSlider
+from PyQt5.QtWidgets import QColorDialog
+from PyQt5.QtCore import QPoint
+from PyQt5.QtGui import QMouseEvent
+import threading
+>>>>>>> 9614527 (Change library to PyQt5 (from 6) to make compatible with orange pi)
 
 
 class ImageViewerDialog(QDialog):
@@ -43,7 +51,7 @@ class ImageViewerDialog(QDialog):
         self.initial_width = int(initial_width)
 
         # Scroll area to host the label for native panning
-        from PyQt6.QtWidgets import QScrollArea
+        from PyQt5.QtWidgets import QScrollArea
         self.scroll = QScrollArea(self)
         self.scroll.setWidgetResizable(False)
         self.scroll.setWidget(self.label)
@@ -173,7 +181,7 @@ class ImageViewerDialog(QDialog):
 
     def eventFilter(self, obj, event):
         # Handle mouse press/move/release/wheel on the viewport
-        from PyQt6.QtCore import QEvent
+        from PyQt5.QtCore import QEvent
         if obj is self.scroll.viewport():
             if event.type() == QEvent.Type.MouseButtonPress:
                 if event.button() == Qt.MouseButton.LeftButton:
@@ -484,6 +492,52 @@ class SlidingMenu(QWidget):
         button.setStyleSheet("text-align: left; padding: 10px; background-color: #4CAF50; color: white; font-weight: bold;")
         self.layout.addWidget(button)
         return button
+
+class OrangePiPWMServo:
+    def __init__(self, pwmchip="/sys/class/pwm/pwmchip1", pwm="pwm0",
+                 period_ns=2_000_000, min_pulse=120_000, max_pulse=1_060_000):
+        self.pwmchip = pwmchip
+        self.pwm = pwm
+        self.period_ns = period_ns
+        self.min_pulse = min_pulse
+        self.max_pulse = max_pulse
+        self.export_path = f"{pwmchip}/export"
+        self.pwm_path = f"{pwmchip}/{pwm}"
+        self.enable_path = f"{self.pwm_path}/enable"
+        self.period_path = f"{self.pwm_path}/period"
+        self.duty_path = f"{self.pwm_path}/duty_cycle"
+
+        self.ensure_exported()
+        self.write(self.enable_path, "0")
+        self.write(self.period_path, self.period_ns)
+        self.write(self.duty_path, self.min_pulse)
+        self.write(self.enable_path, "1")
+
+    def write(self, path, value):
+        with open(path, "w") as f:
+            f.write(str(int(value)))
+
+    def ensure_exported(self):
+        if not os.path.exists(self.pwm_path):
+            self.write(self.export_path, "0")
+            time.sleep(0.5)
+
+    def angle_to_pulse(self, angle_deg, max_angle=270):
+        """Maps 0–max_angle to MIN_PULSE–MAX_PULSE"""
+        ratio = angle_deg / max_angle
+        return int(self.min_pulse + ratio * (self.max_pulse - self.min_pulse))
+
+    def set_angle(self, angle_deg):
+        pulse = self.angle_to_pulse(angle_deg)
+        self.write(self.duty_path, pulse)
+        time.sleep(0.5)  # allow motion
+
+    def close(self):
+        try:
+            self.write(self.enable_path, "0")
+        except Exception:
+            pass
+
         
 class MainWindow(QMainWindow):
     """
@@ -1290,6 +1344,7 @@ class MainWindow(QMainWindow):
                 time.sleep(1.0)
 
         try:
+<<<<<<< HEAD
             # 1. --- Arduino Setup ---
             try:
                 # Mocking serial setup since we cannot actually connect
@@ -1301,6 +1356,26 @@ class MainWindow(QMainWindow):
                 ser = None
 
             # 2. --- RealSense Initialization and Intrinsics Retrieval ---
+=======
+            # Initialize servo controller using basic gpiozero (software PWM)
+            # Initialize Orange Pi PWM servo
+            servo = None
+            servo_enabled = False
+            try:
+                servo = OrangePiPWMServo()
+                servo_enabled = True
+            except Exception as e:
+                print(f"Servo initialization failed: {e}")
+                servo = None
+                servo_enabled = False
+
+            # Helper to map angle (0–270°) to servo.value (-1.0 to +1.0)
+            def angle_to_servo_value(angle_deg, max_angle=270):
+                return (angle_deg / max_angle) * 2.0 - 1.0
+
+            # Initialize RealSense pipeline
+            pipeline = rs.pipeline()
+>>>>>>> 9614527 (Change library to PyQt5 (from 6) to make compatible with orange pi)
             config = rs.config()
             config.enable_stream(rs.stream.depth, STREAM_WIDTH, STREAM_HEIGHT, rs.format.z16, STREAM_FPS)
             config.enable_stream(rs.stream.color, STREAM_WIDTH, STREAM_HEIGHT, rs.format.bgr8, STREAM_FPS)
@@ -1398,11 +1473,22 @@ class MainWindow(QMainWindow):
                 # NOTE: We do NOT apply the extrinsic transformation here. The point cloud is saved 
                 # in the camera's local coordinate frame for this angle.
 
+<<<<<<< HEAD
                 individual_save_path = os.path.join(
                     scan_folder, f'{base_filename}_pcd.ply'
                 )
                 o3d.io.write_point_cloud(individual_save_path, pcd_frame)
                 self.log(f"Saved individual point cloud: {individual_save_path}")
+=======
+            try:
+                angles = [80, 100, 120, 140, 160, 180, 200, 220]
+                for angle_deg in angles:
+                    if servo_enabled and servo is not None:
+                        try:
+                            servo.set_angle(angle_deg)
+                        except Exception:
+                            pass
+>>>>>>> 9614527 (Change library to PyQt5 (from 6) to make compatible with orange pi)
 
                 # Clean up RGBD object before next loop
                 del rgbd
