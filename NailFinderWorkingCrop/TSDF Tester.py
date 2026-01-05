@@ -20,7 +20,7 @@ FIXED_PITCH_DEG = -0.3438 # <-- YOUR CALCULATED PITCH (Y-axis)
 
 # 3. DECLARE ANGLES FOR EACH CAPTURED FRAME
 # IMPORTANT: This list MUST match the angle and order of the .ply files you select.
-FRAME_ANGLES_DEG = [60, 70, 80]
+FRAME_ANGLES_DEG = [40, 50, 60, 70, 80]
 
 # ICP Parameters (For alignment refinement)
 ICP_THRESHOLD = 0.015 # 15 mm maximum distance

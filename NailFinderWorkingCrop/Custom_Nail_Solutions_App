@@ -17,19 +17,11 @@ import cv2
 import math
 import time
 import json
-<<<<<<< HEAD
 from PyQt6.QtWidgets import QSlider
 from PyQt6.QtWidgets import QColorDialog
 from PyQt6.QtCore import QPoint
 from PyQt6.QtGui import QMouseEvent
 import serial
-=======
-from PyQt5.QtWidgets import QSlider
-from PyQt5.QtWidgets import QColorDialog
-from PyQt5.QtCore import QPoint
-from PyQt5.QtGui import QMouseEvent
-import threading
->>>>>>> 9614527 (Change library to PyQt5 (from 6) to make compatible with orange pi)
 
 
 class ImageViewerDialog(QDialog):
@@ -1344,7 +1336,6 @@ class MainWindow(QMainWindow):
                 time.sleep(1.0)
 
         try:
-<<<<<<< HEAD
             # 1. --- Arduino Setup ---
             try:
                 # Mocking serial setup since we cannot actually connect
@@ -1356,26 +1347,6 @@ class MainWindow(QMainWindow):
                 ser = None
 
             # 2. --- RealSense Initialization and Intrinsics Retrieval ---
-=======
-            # Initialize servo controller using basic gpiozero (software PWM)
-            # Initialize Orange Pi PWM servo
-            servo = None
-            servo_enabled = False
-            try:
-                servo = OrangePiPWMServo()
-                servo_enabled = True
-            except Exception as e:
-                print(f"Servo initialization failed: {e}")
-                servo = None
-                servo_enabled = False
-
-            # Helper to map angle (0–270°) to servo.value (-1.0 to +1.0)
-            def angle_to_servo_value(angle_deg, max_angle=270):
-                return (angle_deg / max_angle) * 2.0 - 1.0
-
-            # Initialize RealSense pipeline
-            pipeline = rs.pipeline()
->>>>>>> 9614527 (Change library to PyQt5 (from 6) to make compatible with orange pi)
             config = rs.config()
             config.enable_stream(rs.stream.depth, STREAM_WIDTH, STREAM_HEIGHT, rs.format.z16, STREAM_FPS)
             config.enable_stream(rs.stream.color, STREAM_WIDTH, STREAM_HEIGHT, rs.format.bgr8, STREAM_FPS)
@@ -1473,22 +1444,11 @@ class MainWindow(QMainWindow):
                 # NOTE: We do NOT apply the extrinsic transformation here. The point cloud is saved 
                 # in the camera's local coordinate frame for this angle.
 
-<<<<<<< HEAD
                 individual_save_path = os.path.join(
                     scan_folder, f'{base_filename}_pcd.ply'
                 )
                 o3d.io.write_point_cloud(individual_save_path, pcd_frame)
                 self.log(f"Saved individual point cloud: {individual_save_path}")
-=======
-            try:
-                angles = [80, 100, 120, 140, 160, 180, 200, 220]
-                for angle_deg in angles:
-                    if servo_enabled and servo is not None:
-                        try:
-                            servo.set_angle(angle_deg)
-                        except Exception:
-                            pass
->>>>>>> 9614527 (Change library to PyQt5 (from 6) to make compatible with orange pi)
 
                 # Clean up RGBD object before next loop
                 del rgbd
